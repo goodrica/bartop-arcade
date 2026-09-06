@@ -6,7 +6,8 @@
    ============================================ */
 
 import { AudioManager } from './audio.js';
-// Game modules are loaded dynamically below to avoid circular dependency issues
+// Game modules register via the separate <script type="module"> tag in index.html
+// This avoids circular dependency issues (engine → game → engine)
 
 // ── Colour Palette (retro neon on dark) ──
 export const PALETTE = {
@@ -477,13 +478,11 @@ export function start() {
   requestAnimationFrame(gameLoop);
 }
 
-// ── Auto-start when module loads ──
-// Dynamic import to avoid circular dependency (engine -> game -> engine)
-// By the time the game module loads, engine.js is fully evaluated and all
-// exports (menuGames, registerGame, etc.) are available.
-import('./games/spot-the-difference.js')
-  .catch(err => console.error('Failed to load game module:', err))
-  .then(() => {
-    console.log('Bartop Arcade starting with', menuGames.length, 'game(s)');
-    start();
-  });
+// ── Auto-start when DOM is ready ──
+// Both engine.js and game modules are loaded as separate <script type="module">
+// tags in the HTML, so they execute in DOM order (engine first, games second).
+// We wait for DOMContentLoaded to guarantee both modules are fully evaluated,
+// then kick off the game loop.
+document.addEventListener('DOMContentLoaded', () => {
+  start();
+});
