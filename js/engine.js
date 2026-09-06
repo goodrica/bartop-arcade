@@ -6,7 +6,7 @@
    ============================================ */
 
 import { AudioManager } from './audio.js';
-import './games/spot-the-difference.js';
+// Game modules are loaded dynamically below to avoid circular dependency issues
 
 // ── Colour Palette (retro neon on dark) ──
 export const PALETTE = {
@@ -478,4 +478,12 @@ export function start() {
 }
 
 // ── Auto-start when module loads ──
-start();
+// Dynamic import to avoid circular dependency (engine -> game -> engine)
+// By the time the game module loads, engine.js is fully evaluated and all
+// exports (menuGames, registerGame, etc.) are available.
+import('./games/spot-the-difference.js')
+  .catch(err => console.error('Failed to load game module:', err))
+  .then(() => {
+    console.log('Bartop Arcade starting with', menuGames.length, 'game(s)');
+    start();
+  });
