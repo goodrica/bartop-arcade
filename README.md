@@ -6,7 +6,7 @@ A modern bartop arcade mini-game collection inspired by classics like Megatouch.
 
 | Game | Status | Description |
 |------|--------|-------------|
-| **Spot the Difference** | ✅ Ready | Find 5 differences between two procedurally generated scenes before time runs out. 3 scene types (city, underwater, space). |
+| **Photo Hunt** (Spot the Difference) | ✅ Ready | Megatouch-style: real stock photos with 5 visible changes on the right side. 60-second timer, 10 themed photo categories. |
 | More coming soon | 🚧 | Memory Match, Whack-a-Mole, Reaction Test, Simon Says... |
 
 ## 🚀 How to Play

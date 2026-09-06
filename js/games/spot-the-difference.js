@@ -1,1209 +1,324 @@
 /* ============================================
    Bartop Arcade - Spot the Difference
    ============================================
-   Procedurally generated scenes with subtle
-   visual differences. Find them before time
-   runs out!
+   Inspired by Megatouch's "Photo Hunt".
+   Uses real stock photos from Picsum (free
+   for commercial use, served from Unsplash).
+   One photo on each side; 5 visible
+   modifications on the right.
    ============================================ */
 
 import { AudioManager } from '../audio.js';
 import { registerGame, getGameData, setGameData, pushScreen } from '../engine.js';
 import { PALETTE } from '../engine.js';
+import { loadPhotosByCategory, randomCategoryId } from '../photo-loader.js';
 
-// ── Constants ──
+// ── Layout constants ──
+const SCENE_X_LEFT  = 30;
+const SCENE_X_RIGHT = 540;
+const SCENE_Y       = 160;
+const SCENE_W       = 510;
+const SCENE_H       = 900;
+
 const TOTAL_DIFFERENCES = 5;
-const TIME_LIMIT = 60;
-const PENALTY_TIME = 5;    // Seconds lost on wrong tap
-const SCORE_CORRECT = 100;
-const SCORE_BONUS_MULT = 2; // Multiplier for remaining time
+const TIME_LIMIT        = 60;
+const PENALTY_TIME      = 5;
+const SCORE_CORRECT     = 100;
+const SCORE_BONUS_MULT  = 2;
+const PHOTO_HIT_RADIUS  = 50;   // logical pixels — generous for touch
 
-// ── Scene dimensions ──
-const SCENE_X = 30;
-const SCENE_W = 510;
-const SCENE_GAP = 0;
-const SCENE2_X = 540;
-const SCENE_H = 900;
-const SCENE_TOP = 140;
+// ── Per-round state ──
+let photoImg        = null;     // HTMLImageElement (shared left/right)
+let photoUrl        = '';       // for credits
+let categoryId      = '';
+let differences     = [];       // [{type, x, y, hitW, hitH, hitR, found, apply, hint}]
+let foundParticles  = [];
+let wrongFlash      = 0;
+let warningFlash    = 0;
+let splashTimer     = 2.0;
+let lastTickSecond  = -1;
+let loadError       = null;
 
-// ── State ──
-let leftScene = null;
-let rightScene = null;
-let differences = [];
-let foundIndices = [];
-let foundParticles = [];   // Visual feedback
-let wrongFlash = 0;        // Wrong tap feedback timer
-let warningFlash = 0;       // Timer warning pulse
-let splashTimer = 0;        // Start splash delay
-let lastTickSecond = -1;    // For metronome tick
+// ── Modification registry ──
+// Each mod draws an overlay on the right photo AND contributes a hit zone.
+// `apply(ctx, ox, oy)` runs once during draw to render the overlay.
+// `hitPoint` is the logical point (relative to photo) the user must tap.
+// `hitRadius` is the touch hit zone radius.
+const MOD_TYPES = [
+  // Bright, easy-to-spot additions
+  { type: 'red_dot',       color: '#ff2244',  shape: 'circle',   size: 30, hint: 'Red dot' },
+  { type: 'yellow_square', color: '#ffdd00',  shape: 'square',   size: 50, hint: 'Yellow square' },
+  { type: 'blue_x',        color: '#2266ff',  shape: 'x',        size: 44, hint: 'Blue X' },
+  { type: 'green_tri',     color: '#33ee66',  shape: 'triangle', size: 50, hint: 'Green triangle' },
+  { type: 'cyan_circle',   color: '#00ddff',  shape: 'circle',   size: 28, hint: 'Cyan circle' },
+  { type: 'pink_star',     color: '#ff66cc',  shape: 'star',     size: 46, hint: 'Pink star' },
+  // Subtle photo modifications
+  { type: 'invert',        hint: 'Inverted patch' },
+  { type: 'darken',        hint: 'Darkened patch' },
+  { type: 'brighten',      hint: 'Brightened patch' },
+  { type: 'hue_shift',     hint: 'Color-shifted patch' },
+];
 
-// ── Scene Generators ──
-// NOTE: resolved lazily inside generateRound() because class declarations
-// (CityScene etc.) are in the temporal dead zone at this point in the module.
-function getSceneGenerators() {
-  return [CityScene, UnderwaterScene, SpaceScene];
-}
+function rand(min, max) { return min + Math.random() * (max - min); }
+function randInt(min, max) { return Math.floor(rand(min, max + 1)); }
 
-function pickRandom(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
+// ── Round generation ──
+async function generateRound() {
+  // Pick a category, load one photo
+  categoryId = randomCategoryId();
+  const imgs = await loadPhotosByCategory(categoryId, 1);
+  photoImg = imgs[0];
 
-function rand(min, max) {
-  return min + Math.random() * (max - min);
-}
-
-function randInt(min, max) {
-  return Math.floor(rand(min, max + 1));
-}
-
-// ── Colour palettes per theme ──
-const CITY_COLORS = {
-  sky:       ['#0f0f2a', '#1a1a40'],
-  building:  ['#1a1a3a', '#222244', '#2a2a50'],
-  windowOn:  ['#ffdd44', '#ffaa00', '#ff8822', '#33ddff', '#66ff88'],
-  windowOff: ['#111122', '#181830'],
-  cloud:     ['#334466', '#445577'],
-  moon:      '#99aacc',
-  star:      '#ffffff',
-};
-
-const WATER_COLORS = {
-  bg:        ['#0a1a2a', '#0d2137', '#0f2844'],
-  fish:      ['#ff6644', '#ffaa33', '#44ddff', '#ff4488', '#66ff66'],
-  seaweed:   ['#22aa44', '#33cc55', '#44ee66'],
-  bubble:    ['#88ccff', '#aaddff'],
-  rock:      ['#334455', '#445566'],
-  sand:      '#1a2a33',
-};
-
-const SPACE_COLORS = {
-  bg:        '#050510',
-  star:      '#ffffff',
-  planet1:   ['#ff6644', '#cc5533', '#aa4422'],
-  planet2:   ['#44aaff', '#3388dd', '#2277cc'],
-  planet3:   ['#ffcc44', '#eebb33', '#ddaa22'],
-  rocket:    '#eeeeee',
-  alien:     '#66ff66',
-  nebula:    ['#442266', '#553377', '#664488'],
-};
-
-// ── Scene Types ──
-
-class CityScene {
-  constructor() {
-    this.buildings = [];
-    this.clouds = [];
-    this.stars = [];
-    this.moonY = rand(100, 400);
-    this.moonX = rand(100, 400);
-    this.moonPhase = rand(2, 6);
-    this.groundY = randInt(720, 780);
-    this.differences = [];
-
-    // Generate buildings
-    let bx = 0;
-    while (bx < SCENE_W + 50) {
-      const bw = randInt(30, 80);
-      const bh = randInt(120, 400);
-      const by = this.groundY - bh;
-      const windows = [];
-      const cols = Math.floor(bw / 18);
-      const rows = Math.floor(bh / 22);
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          windows.push({
-            x: bx + 10 + c * 18 + rand(0, 4),
-            y: by + 20 + r * 22 + rand(0, 4),
-            on: Math.random() > 0.3,
-            color: pickRandom(CITY_COLORS.windowOn),
-          });
-        }
-      }
-      this.buildings.push({ x: bx, y: by, w: bw, h: bh, windows, color: pickRandom(CITY_COLORS.building) });
-      bx += bw + rand(2, 8);
-    }
-
-    // Clouds
-    for (let i = 0; i < 4; i++) {
-      this.clouds.push({ x: rand(0, SCENE_W), y: rand(30, 200), w: rand(80, 160), h: rand(20, 35) });
-    }
-
-    // Stars
-    for (let i = 0; i < 30; i++) {
-      this.stars.push({ x: rand(0, SCENE_W), y: rand(0, 400), size: rand(1, 2.5) });
-    }
+  if (!photoImg) {
+    loadError = new Error(`Failed to load photo from category: ${categoryId}`);
+    return false;
   }
 
-  draw(ctx, ox, oy) {
-    const x = ox, y = oy;
+  loadError = null;
+  photoUrl = `${categoryId} photo (Picsum/Unsplash)`;
 
-    // Sky gradient
-    const grad = ctx.createLinearGradient(x, y, x, y + SCENE_H);
-    grad.addColorStop(0, '#0a0a20');
-    grad.addColorStop(0.5, '#1a1a3a');
-    grad.addColorStop(1, '#2a2a4a');
-    ctx.fillStyle = grad;
-    ctx.fillRect(x, y, SCENE_W, SCENE_H);
-
-    // Stars
-    ctx.fillStyle = '#ffffff';
-    for (const s of this.stars) {
-      ctx.globalAlpha = rand(0.3, 1);
-      ctx.beginPath();
-      ctx.arc(x + s.x, y + s.y, s.size, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-
-    // Moon
-    ctx.fillStyle = '#99aacc';
-    ctx.shadowColor = '#99aacc';
-    ctx.shadowBlur = 30;
-    ctx.beginPath();
-    ctx.arc(x + this.moonX, y + this.moonY, 30, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.shadowBlur = 0;
-
-    // Clouds
-    for (const c of this.clouds) {
-      ctx.fillStyle = '#334466';
-      ctx.globalAlpha = 0.6;
-      ctx.beginPath();
-      ctx.ellipse(x + c.x, y + c.y, c.w / 2, c.h / 2, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.ellipse(x + c.x - c.w * 0.25, y + c.y + 5, c.w * 0.3, c.h * 0.4, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.ellipse(x + c.x + c.w * 0.25, y + c.y + 5, c.w * 0.3, c.h * 0.4, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
-    }
-
-    // Buildings
-    for (const b of this.buildings) {
-      ctx.fillStyle = b.color;
-      ctx.fillRect(x + b.x, y + b.y, b.w, b.h);
-
-      // Building outline
-      ctx.strokeStyle = 'rgba(100,100,180,0.3)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(x + b.x, y + b.y, b.w, b.h);
-
-      // Windows
-      for (const w of b.windows) {
-        ctx.fillStyle = w.on ? w.color : '#111122';
-        ctx.fillRect(x + w.x, y + w.y, 10, 12);
-      }
-    }
-
-    // Ground
-    ctx.fillStyle = '#1a1a30';
-    ctx.fillRect(x, y + this.groundY, SCENE_W, SCENE_H - this.groundY);
-
-    // Ground line
-    ctx.strokeStyle = '#2a2a44';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(x, y + this.groundY + 2);
-    ctx.lineTo(x + SCENE_W, y + this.groundY + 2);
-    ctx.stroke();
+  // Pick 5 unique modification types from the registry
+  const pool = [...MOD_TYPES];
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
   }
+  const chosen = pool.slice(0, TOTAL_DIFFERENCES);
 
-  /** Mutate to produce a difference and return the difference descriptor */
-  mutateDifference(existingDiffs) {
-    const candidates = [];
+  // Place each modification at a random point on the photo
+  differences = chosen.map((mod, i) => {
+    const margin = 60;
+    const x = rand(margin, SCENE_W - margin);
+    const y = rand(margin, SCENE_H - margin);
+    return {
+      key: `${mod.type}-${i}-${Date.now()}`,
+      type: mod.type,
+      color: mod.color,
+      shape: mod.shape,
+      size: mod.size,
+      hint: mod.hint,
+      x, y,
+      hitR: PHOTO_HIT_RADIUS,
+      found: false,
+    };
+  });
 
-    // 1. Toggle a window on/off
-    for (const b of this.buildings) {
-      for (let wi = 0; wi < b.windows.length; wi++) {
-        const w = b.windows[wi];
-        // Generate a unique key for this window
-        const key = `window-${b.x}-${w.x}-${w.y}`;
-        if (!existingDiffs.some(d => d.key === key)) {
-          candidates.push({
-            key,
-            x: SCENE_W / 2 + this.buildings.indexOf(b) * 5, // approximate center
-            y: w.y,
-            hitX: () => w.x,
-            hitY: () => w.y,
-            hitW: 14,
-            hitH: 16,
-            apply: () => { w.on = !w.on; },
-            hint: 'Window toggled',
-          });
-        }
-      }
-    }
-
-    // 2. Move a cloud
-    for (let ci = 0; ci < this.clouds.length; ci++) {
-      const c = this.clouds[ci];
-      const key = `cloud-${ci}`;
-      if (!existingDiffs.some(d => d.key === key)) {
-        const dx = rand(20, 60) * (Math.random() > 0.5 ? 1 : -1);
-        candidates.push({
-          key,
-          x: c.x,
-          y: c.y,
-          hitX: () => c.x,
-          hitY: () => c.y,
-          hitW: c.w,
-          hitH: c.h,
-          apply: () => { c.x += dx; },
-          hint: 'Cloud moved',
-        });
-      }
-    }
-
-    // 3. Change a star's size
-    for (let si = 0; si < this.stars.length; si++) {
-      const s = this.stars[si];
-      const key = `star-${si}`;
-      if (!existingDiffs.some(d => d.key === key)) {
-        candidates.push({
-          key,
-          x: s.x,
-          y: s.y,
-          hitX: () => s.x,
-          hitY: () => s.y,
-          hitW: 10,
-          hitH: 10,
-          apply: () => { s.size = s.size > 2 ? 0.5 : 3; },
-          hint: 'Star changed',
-        });
-      }
-    }
-
-    if (candidates.length === 0) return null;
-    return pickRandom(candidates);
-  }
+  return true;
 }
 
-class UnderwaterScene {
-  constructor() {
-    this.fishes = [];
-    this.bubbles = [];
-    this.seaweeds = [];
-    this.rocks = [];
-    this.sandY = randInt(780, 830);
-    this.differences = [];
+// ── Modification overlay drawing ──
+function drawMod(ctx, mod, ox, oy) {
+  const cx = ox + mod.x;
+  const cy = oy + mod.y;
 
-    // Fishes
-    for (let i = 0; i < 7; i++) {
-      this.fishes.push({
-        x: rand(30, SCENE_W - 30),
-        y: rand(50, this.sandY - 50),
-        size: randInt(15, 30),
-        color: pickRandom(WATER_COLORS.fish),
-        dir: Math.random() > 0.5 ? 1 : -1,
-        speed: rand(10, 30),
-      });
-    }
+  ctx.save();
 
-    // Bubbles
-    for (let i = 0; i < 12; i++) {
-      this.bubbles.push({
-        x: rand(20, SCENE_W - 20),
-        y: rand(20, this.sandY - 20),
-        r: rand(3, 10),
-        alpha: rand(0.2, 0.6),
-      });
-    }
-
-    // Seaweed
-    for (let i = 0; i < 5; i++) {
-      const sx = rand(20, SCENE_W - 20);
-      const sh = randInt(80, 200);
-      this.seaweeds.push({
-        x: sx,
-        y: this.sandY - sh,
-        h: sh,
-        segments: 5,
-        color: pickRandom(WATER_COLORS.seaweed),
-        sway: rand(0, Math.PI * 2),
-      });
-    }
-
-    // Rocks
-    for (let i = 0; i < 4; i++) {
-      this.rocks.push({
-        x: rand(10, SCENE_W - 40),
-        y: this.sandY - randInt(10, 30),
-        w: randInt(30, 70),
-        h: randInt(15, 30),
-        color: pickRandom(WATER_COLORS.rock),
-      });
-    }
-  }
-
-  draw(ctx, ox, oy) {
-    const x = ox, y = oy;
-
-    // Water gradient
-    const grad = ctx.createLinearGradient(x, y, x, y + SCENE_H);
-    grad.addColorStop(0, '#0a1a2a');
-    grad.addColorStop(0.3, '#0d2137');
-    grad.addColorStop(0.6, '#0f2844');
-    grad.addColorStop(1, '#152a40');
-    ctx.fillStyle = grad;
-    ctx.fillRect(x, y, SCENE_W, SCENE_H);
-
-    // Light rays
-    ctx.globalAlpha = 0.05;
-    for (let i = 0; i < 5; i++) {
-      ctx.fillStyle = '#88ccff';
-      const rx = rand(50, SCENE_W - 50);
+  switch (mod.type) {
+    case 'red_dot':
+    case 'cyan_circle': {
+      // Filled circle with subtle glow
+      ctx.shadowColor = mod.color;
+      ctx.shadowBlur = 18;
+      ctx.fillStyle = mod.color;
       ctx.beginPath();
-      ctx.moveTo(x + rx, y);
-      ctx.lineTo(x + rx - 30, y + SCENE_H);
-      ctx.lineTo(x + rx + 30, y + SCENE_H);
-      ctx.closePath();
+      ctx.arc(cx, cy, mod.size, 0, Math.PI * 2);
       ctx.fill();
+      ctx.shadowBlur = 0;
+      // Inner highlight
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.beginPath();
+      ctx.arc(cx - mod.size * 0.3, cy - mod.size * 0.3, mod.size * 0.25, 0, Math.PI * 2);
+      ctx.fill();
+      break;
     }
-    ctx.globalAlpha = 1;
 
-    // Seaweed (back layer)
-    for (const sw of this.seaweeds) {
-      ctx.strokeStyle = sw.color;
+    case 'yellow_square': {
+      ctx.shadowColor = mod.color;
+      ctx.shadowBlur = 18;
+      ctx.fillStyle = mod.color;
+      ctx.fillRect(cx - mod.size / 2, cy - mod.size / 2, mod.size, mod.size);
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(cx - mod.size / 2, cy - mod.size / 2, mod.size, mod.size);
+      break;
+    }
+
+    case 'blue_x': {
+      ctx.shadowColor = mod.color;
+      ctx.shadowBlur = 14;
+      ctx.strokeStyle = mod.color;
       ctx.lineWidth = 8;
       ctx.lineCap = 'round';
       ctx.beginPath();
-      const sway = Math.sin(sw.sway) * 15;
-      ctx.moveTo(x + sw.x, y + sw.y + sw.h);
-      for (let s = 0; s <= sw.segments; s++) {
-        const sy = y + sw.y + sw.h - (sw.h / sw.segments) * s;
-        const sx = x + sw.x + Math.sin(sway * s / sw.segments + sw.sway) * 10;
-        ctx.lineTo(sx, sy);
-      }
+      ctx.moveTo(cx - mod.size / 2, cy - mod.size / 2);
+      ctx.lineTo(cx + mod.size / 2, cy + mod.size / 2);
+      ctx.moveTo(cx + mod.size / 2, cy - mod.size / 2);
+      ctx.lineTo(cx - mod.size / 2, cy + mod.size / 2);
       ctx.stroke();
+      ctx.shadowBlur = 0;
+      break;
     }
 
-    // Bubbles
-    for (const b of this.bubbles) {
-      ctx.strokeStyle = WATER_COLORS.bubble[0];
-      ctx.fillStyle = 'rgba(136,204,255,0.15)';
-      ctx.globalAlpha = b.alpha;
+    case 'green_tri': {
+      ctx.shadowColor = mod.color;
+      ctx.shadowBlur = 14;
+      ctx.fillStyle = mod.color;
       ctx.beginPath();
-      ctx.arc(x + b.x, y + b.y, b.r, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-
-    // Rocks
-    for (const r of this.rocks) {
-      ctx.fillStyle = r.color;
-      ctx.beginPath();
-      ctx.ellipse(x + r.x, y + r.y, r.w / 2, r.h / 2, 0, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // Fishes
-    for (const f of this.fishes) {
-      ctx.fillStyle = f.color;
-      const fx = x + f.x;
-      const fy = y + f.y;
-      // Body
-      ctx.beginPath();
-      ctx.ellipse(fx, fy, f.size, f.size * 0.5, 0, 0, Math.PI * 2);
-      ctx.fill();
-      // Tail
-      ctx.beginPath();
-      ctx.moveTo(fx - f.size * f.dir, fy);
-      ctx.lineTo(fx - f.size * 1.5 * f.dir, fy - f.size * 0.5);
-      ctx.lineTo(fx - f.size * 1.5 * f.dir, fy + f.size * 0.5);
+      ctx.moveTo(cx, cy - mod.size / 2);
+      ctx.lineTo(cx + mod.size / 2, cy + mod.size / 2);
+      ctx.lineTo(cx - mod.size / 2, cy + mod.size / 2);
       ctx.closePath();
       ctx.fill();
-      // Eye
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(fx + f.dir * f.size * 0.3, fy - f.size * 0.1, f.size * 0.15, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#000000';
-      ctx.beginPath();
-      ctx.arc(fx + f.dir * f.size * 0.3, fy - f.size * 0.1, f.size * 0.07, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = '#003300';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      break;
     }
 
-    // Sand
-    ctx.fillStyle = WATER_COLORS.sand;
-    ctx.fillRect(x, y + this.sandY, SCENE_W, SCENE_H - this.sandY);
-  }
-
-  mutateDifference(existingDiffs) {
-    const candidates = [];
-
-    // 1. Change fish color
-    for (let fi = 0; fi < this.fishes.length; fi++) {
-      const f = this.fishes[fi];
-      const key = `fish-color-${fi}`;
-      if (!existingDiffs.some(d => d.key === key)) {
-        const newColor = pickRandom(WATER_COLORS.fish.filter(c => c !== f.color));
-        candidates.push({
-          key,
-          x: f.x,
-          y: f.y,
-          hitX: () => f.x,
-          hitY: () => f.y,
-          hitW: f.size * 2,
-          hitH: f.size,
-          apply: () => { f.color = newColor; },
-          hint: 'Fish color changed',
-        });
+    case 'pink_star': {
+      ctx.shadowColor = mod.color;
+      ctx.shadowBlur = 16;
+      ctx.fillStyle = mod.color;
+      ctx.strokeStyle = '#660044';
+      ctx.lineWidth = 2;
+      const spikes = 5, outerR = mod.size / 2, innerR = mod.size / 4;
+      ctx.beginPath();
+      for (let i = 0; i < spikes * 2; i++) {
+        const r = i % 2 === 0 ? outerR : innerR;
+        const angle = (Math.PI / spikes) * i - Math.PI / 2;
+        const px = cx + Math.cos(angle) * r;
+        const py = cy + Math.sin(angle) * r;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
       }
-    }
-
-    // 2. Add/remove a bubble
-    for (let bi = 0; bi < this.bubbles.length; bi++) {
-      const b = this.bubbles[bi];
-      const key = `bubble-${bi}`;
-      if (!existingDiffs.some(d => d.key === key)) {
-        candidates.push({
-          key,
-          x: b.x,
-          y: b.y,
-          hitX: () => b.x,
-          hitY: () => b.y,
-          hitW: b.r * 2 + 4,
-          hitH: b.r * 2 + 4,
-          apply: () => { b.alpha = b.alpha > 0 ? 0 : rand(0.3, 0.7); },
-          hint: 'Bubble hidden/shown',
-        });
-      }
-    }
-
-    // 3. Move a fish
-    for (let fi = 0; fi < this.fishes.length; fi++) {
-      const f = this.fishes[fi];
-      const key = `fish-move-${fi}`;
-      if (!existingDiffs.some(d => d.key === key)) {
-        candidates.push({
-          key,
-          x: f.x,
-          y: f.y,
-          hitX: () => f.x,
-          hitY: () => f.y,
-          hitW: f.size * 2,
-          hitH: f.size,
-          apply: () => { f.x = Math.max(30, Math.min(SCENE_W - 30, f.x + rand(-40, 40))); },
-          hint: 'Fish moved',
-        });
-      }
-    }
-
-    if (candidates.length === 0) return null;
-    return pickRandom(candidates);
-  }
-}
-
-class SpaceScene {
-  constructor() {
-    this.stars = [];
-    this.planets = [];
-    this.nebulae = [];
-    this.rocketY = 0;
-    this.aliens = [];
-    this.differences = [];
-
-    // Stars (many)
-    for (let i = 0; i < 60; i++) {
-      this.stars.push({
-        x: rand(0, SCENE_W),
-        y: rand(0, SCENE_H),
-        size: rand(0.5, 2),
-        twinkle: rand(0, Math.PI * 2),
-      });
-    }
-
-    // Planets
-    for (let i = 0; i < 3; i++) {
-      this.planets.push({
-        x: rand(50, SCENE_W - 50),
-        y: rand(100, SCENE_H - 100),
-        r: randInt(15, 45),
-        color: pickRandom(i === 0 ? SPACE_COLORS.planet1 : i === 1 ? SPACE_COLORS.planet2 : SPACE_COLORS.planet3),
-        hasRing: i === 1 && Math.random() > 0.4,
-        craters: i === 0 ? randInt(2, 5) : 0,
-      });
-    }
-
-    // Nebulae
-    for (let i = 0; i < 3; i++) {
-      this.nebulae.push({
-        x: rand(0, SCENE_W),
-        y: rand(0, SCENE_H),
-        r: rand(40, 100),
-        color: pickRandom(SPACE_COLORS.nebula),
-        alpha: rand(0.05, 0.12),
-      });
-    }
-
-    // Aliens
-    for (let i = 0; i < 2; i++) {
-      this.aliens.push({
-        x: rand(50, SCENE_W - 50),
-        y: rand(50, SCENE_H - 200),
-        size: randInt(12, 20),
-      });
-    }
-  }
-
-  draw(ctx, ox, oy) {
-    const x = ox, y = oy;
-
-    // Deep space background
-    ctx.fillStyle = '#050510';
-    ctx.fillRect(x, y, SCENE_W, SCENE_H);
-
-    // Nebulae
-    for (const n of this.nebulae) {
-      const grad = ctx.createRadialGradient(x + n.x, y + n.y, 0, x + n.x, y + n.y, n.r);
-      grad.addColorStop(0, n.color.replace(')', `, ${n.alpha})`).replace('rgb', 'rgba'));
-      grad.addColorStop(1, 'rgba(5,5,16,0)');
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(x + n.x, y + n.y, n.r, 0, Math.PI * 2);
+      ctx.closePath();
       ctx.fill();
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      break;
     }
 
-    // Stars
-    for (const s of this.stars) {
-      ctx.fillStyle = '#ffffff';
-      ctx.globalAlpha = 0.5 + Math.sin(s.twinkle) * 0.4;
-      ctx.beginPath();
-      ctx.arc(x + s.x, y + s.y, s.size, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-
-    // Planets
-    for (const p of this.planets) {
-      ctx.fillStyle = p.color;
-      ctx.shadowColor = p.color;
-      ctx.shadowBlur = 25;
-      ctx.beginPath();
-      ctx.arc(x + p.x, y + p.y, p.r, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Ring
-      if (p.hasRing) {
-        ctx.shadowBlur = 0;
-        ctx.strokeStyle = p.color;
-        ctx.lineWidth = 3;
-        ctx.globalAlpha = 0.6;
-        ctx.beginPath();
-        ctx.ellipse(x + p.x, y + p.y, p.r * 1.6, p.r * 0.3, -0.3, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-      }
-
-      // Craters
-      if (p.craters > 0) {
-        ctx.shadowBlur = 0;
-        ctx.fillStyle = 'rgba(0,0,0,0.2)';
-        for (let ci = 0; ci < p.craters; ci++) {
-          const cx = x + p.x + rand(-p.r * 0.4, p.r * 0.4);
-          const cy = y + p.y + rand(-p.r * 0.4, p.r * 0.4);
-          const cr = rand(3, p.r * 0.2);
-          ctx.beginPath();
-          ctx.arc(cx, cy, cr, 0, Math.PI * 2);
-          ctx.fill();
+    case 'invert': {
+      // Get pixels, invert them, put them back
+      const w = 80, h = 80;
+      const sx = cx - w / 2, sy = cy - h / 2;
+      try {
+        const imgData = ctx.getImageData(sx, sy, w, h);
+        const d = imgData.data;
+        for (let i = 0; i < d.length; i += 4) {
+          d[i]     = 255 - d[i];
+          d[i + 1] = 255 - d[i + 1];
+          d[i + 2] = 255 - d[i + 2];
         }
+        ctx.putImageData(imgData, sx, sy);
+        // Border so it's findable
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([6, 4]);
+        ctx.strokeRect(sx, sy, w, h);
+        ctx.setLineDash([]);
+      } catch (e) {
+        // getImageData can throw if region is invalid (cross-origin etc.)
+        drawFallbackTint(ctx, cx, cy, 80, '#ff00ff');
       }
-      ctx.shadowBlur = 0;
+      break;
     }
 
-    // Aliens
-    for (const a of this.aliens) {
-      ctx.fillStyle = '#66ff66';
-      ctx.shadowColor = '#66ff66';
-      ctx.shadowBlur = 10;
-      // Body
-      ctx.beginPath();
-      ctx.ellipse(x + a.x, y + a.y, a.size, a.size * 0.7, 0, 0, Math.PI * 2);
-      ctx.fill();
-      // Eyes
-      ctx.fillStyle = '#000000';
-      ctx.shadowBlur = 0;
-      ctx.beginPath();
-      ctx.arc(x + a.x - a.size * 0.3, y + a.y - a.size * 0.15, a.size * 0.15, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(x + a.x + a.size * 0.3, y + a.y - a.size * 0.15, a.size * 0.15, 0, Math.PI * 2);
-      ctx.fill();
-      // Eye whites
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(x + a.x - a.size * 0.3, y + a.y - a.size * 0.15, a.size * 0.06, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(x + a.x + a.size * 0.3, y + a.y - a.size * 0.15, a.size * 0.06, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.shadowBlur = 0;
+    case 'darken': {
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(cx - 50, cy - 50, 100, 100);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 4]);
+      ctx.strokeRect(cx - 50, cy - 50, 100, 100);
+      ctx.setLineDash([]);
+      break;
+    }
+
+    case 'brighten': {
+      ctx.fillStyle = 'rgba(255,255,255,0.65)';
+      ctx.fillRect(cx - 50, cy - 50, 100, 100);
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 4]);
+      ctx.strokeRect(cx - 50, cy - 50, 100, 100);
+      ctx.setLineDash([]);
+      break;
+    }
+
+    case 'hue_shift': {
+      ctx.fillStyle = 'rgba(255,0,128,0.55)';
+      ctx.fillRect(cx - 50, cy - 50, 100, 100);
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 4]);
+      ctx.strokeRect(cx - 50, cy - 50, 100, 100);
+      ctx.setLineDash([]);
+      break;
     }
   }
 
-  mutateDifference(existingDiffs) {
-    const candidates = [];
-
-    // 1. Change a planet's color
-    for (let pi = 0; pi < this.planets.length; pi++) {
-      const p = this.planets[pi];
-      const pal = pi === 0 ? SPACE_COLORS.planet1 : pi === 1 ? SPACE_COLORS.planet2 : SPACE_COLORS.planet3;
-      const key = `planet-color-${pi}`;
-      if (!existingDiffs.some(d => d.key === key)) {
-        const newColor = pickRandom(pal.filter(c => c !== p.color));
-        candidates.push({
-          key,
-          x: p.x,
-          y: p.y,
-          hitX: () => p.x,
-          hitY: () => p.y,
-          hitW: p.r * 2,
-          hitH: p.r * 2,
-          apply: () => { p.color = newColor; },
-          hint: 'Planet color changed',
-        });
-      }
-    }
-
-    // 2. Toggle planet ring
-    for (let pi = 0; pi < this.planets.length; pi++) {
-      const p = this.planets[pi];
-      const key = `planet-ring-${pi}`;
-      if (!existingDiffs.some(d => d.key === key)) {
-        candidates.push({
-          key,
-          x: p.x,
-          y: p.y,
-          hitX: () => p.x,
-          hitY: () => p.y,
-          hitW: p.r * 3,
-          hitH: p.r * 2,
-          apply: () => { p.hasRing = !p.hasRing; },
-          hint: 'Planet ring toggled',
-        });
-      }
-    }
-
-    // 3. Move an alien
-    for (let ai = 0; ai < this.aliens.length; ai++) {
-      const a = this.aliens[ai];
-      const key = `alien-move-${ai}`;
-      if (!existingDiffs.some(d => d.key === key)) {
-        candidates.push({
-          key,
-          x: a.x,
-          y: a.y,
-          hitX: () => a.x,
-          hitY: () => a.y,
-          hitW: a.size * 2 + 10,
-          hitH: a.size * 2 + 10,
-          apply: () => { a.x = Math.max(30, Math.min(SCENE_W - 30, a.x + rand(-50, 50))); },
-          hint: 'Alien moved',
-        });
-      }
-    }
-
-    if (candidates.length === 0) return null;
-    return pickRandom(candidates);
-  }
+  ctx.restore();
 }
 
-// ── Generate a pair of scenes with differences ──
-function generateRound() {
-  const Generator = pickRandom(getSceneGenerators());
-  const baseScene = new Generator();
-
-  // Deep-clone the base scene's data for the right-hand copy.
-  // The clone is a plain object (no methods), so it's rendered via
-  // drawSceneGeneric()'s plain-object draw paths.
-  const cloneData = JSON.parse(JSON.stringify(baseScene, (k, v) => {
-    if (k === 'differences' || k === 'mutatePointer') return undefined;
-    return v;
-  }));
-
-  return { left: baseScene, right: cloneData };
+function drawFallbackTint(ctx, cx, cy, size, color) {
+  // Used when getImageData fails (CORS): draw a visible tinted box
+  ctx.fillStyle = color;
+  ctx.fillRect(cx - size / 2, cy - size / 2, size, size);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(cx - size / 2, cy - size / 2, size, size);
 }
 
-// Standalone mutation function for any scene type
-function mutateScene(scene, existingDiffs) {
-  // Detect type by properties
-  const isCity = 'buildings' in scene;
-  const isWater = 'fishes' in scene;
-  const isSpace = 'planets' in scene;
-
-  if (isCity) return mutateCityDifference(scene, existingDiffs);
-  if (isWater) return mutateWaterDifference(scene, existingDiffs);
-  if (isSpace) return mutateSpaceDifference(scene, existingDiffs);
-  return null;
-}
-
-function mutateCityDifference(scene, existingDiffs) {
-  const candidates = [];
-
-  // Toggle a window
-  for (const b of scene.buildings) {
-    for (let wi = 0; wi < b.windows.length; wi++) {
-      const w = b.windows[wi];
-      if (w._mutated) continue;
-      const key = `city-win-${b.x}-${wi}`;
-      if (!existingDiffs.some(d => d.key === key)) {
-        candidates.push({
-          key, scene,
-          x: b.x + w.x - SCENE_W / 2,
-          y: w.y,
-          hitX: () => b.x + w.x,
-          hitY: () => w.y,
-          hitW: 14,
-          hitH: 16,
-          apply: () => { w.on = !w.on; w._mutated = true; },
-          hint: 'Window changed',
-        });
-      }
+// ── Photo rendering with safe fallback ──
+function drawPhoto(ctx, img, ox, oy) {
+  if (img && img.complete && img.naturalWidth > 0) {
+    // object-fit: cover behavior — crop to fill, no stretch
+    const srcAspect = img.naturalWidth / img.naturalHeight;
+    const dstAspect = SCENE_W / SCENE_H;
+    let sx = 0, sy = 0, sw = img.naturalWidth, sh = img.naturalHeight;
+    if (srcAspect > dstAspect) {
+      // Source is wider — crop horizontally
+      sw = img.naturalHeight * dstAspect;
+      sx = (img.naturalWidth - sw) / 2;
+    } else {
+      // Source is taller — crop vertically
+      sh = img.naturalWidth / dstAspect;
+      sy = (img.naturalHeight - sh) / 2;
     }
-  }
-
-  // Move a cloud
-  for (let ci = 0; ci < scene.clouds.length; ci++) {
-    const c = scene.clouds[ci];
-    const key = `city-cloud-${ci}`;
-    if (!existingDiffs.some(d => d.key === key)) {
-      candidates.push({
-        key, scene,
-        x: c.x - SCENE_W / 2,
-        y: c.y,
-        hitX: () => c.x,
-        hitY: () => c.y,
-        hitW: c.w,
-        hitH: c.h,
-        apply: () => { c.x += rand(20, 60) * (Math.random() > 0.5 ? 1 : -1); },
-        hint: 'Cloud moved',
-      });
-    }
-  }
-
-  if (candidates.length === 0) return null;
-  return pickRandom(candidates);
-}
-
-function mutateWaterDifference(scene, existingDiffs) {
-  const candidates = [];
-
-  // Change fish color
-  for (let fi = 0; fi < scene.fishes.length; fi++) {
-    const f = scene.fishes[fi];
-    const key = `water-fish-${fi}`;
-    if (!existingDiffs.some(d => d.key === key)) {
-      const newColor = pickRandom(WATER_COLORS.fish.filter(c => c !== f.color));
-      candidates.push({
-        key, scene,
-        x: f.x - SCENE_W / 2,
-        y: f.y,
-        hitX: () => f.x,
-        hitY: () => f.y,
-        hitW: f.size * 2,
-        hitH: f.size,
-        apply: () => { f.color = newColor; },
-        hint: 'Fish color changed',
-      });
-    }
-  }
-
-  // Toggle bubble visibility
-  for (let bi = 0; bi < scene.bubbles.length; bi++) {
-    const b = scene.bubbles[bi];
-    const key = `water-bubble-${bi}`;
-    if (!existingDiffs.some(d => d.key === key)) {
-      candidates.push({
-        key, scene,
-        x: b.x - SCENE_W / 2,
-        y: b.y,
-        hitX: () => b.x,
-        hitY: () => b.y,
-        hitW: b.r * 2 + 4,
-        hitH: b.r * 2 + 4,
-        apply: () => { b.alpha = b.alpha > 0.1 ? 0 : rand(0.3, 0.7); },
-        hint: 'Bubble hidden/shown',
-      });
-    }
-  }
-
-  if (candidates.length === 0) return null;
-  return pickRandom(candidates);
-}
-
-function mutateSpaceDifference(scene, existingDiffs) {
-  const candidates = [];
-
-  // Change planet color
-  for (let pi = 0; pi < scene.planets.length; pi++) {
-    const p = scene.planets[pi];
-    const key = `space-planet-${pi}`;
-    if (!existingDiffs.some(d => d.key === key)) {
-      const allColors = [...SPACE_COLORS.planet1, ...SPACE_COLORS.planet2, ...SPACE_COLORS.planet3];
-      const newColor = pickRandom(allColors.filter(c => c !== p.color));
-      candidates.push({
-        key, scene,
-        x: p.x - SCENE_W / 2,
-        y: p.y,
-        hitX: () => p.x,
-        hitY: () => p.y,
-        hitW: p.r * 2,
-        hitH: p.r * 2,
-        apply: () => { p.color = newColor; },
-        hint: 'Planet color changed',
-      });
-    }
-  }
-
-  // Toggle planet ring
-  for (let pi = 0; pi < scene.planets.length; pi++) {
-    const p = scene.planets[pi];
-    if (!('hasRing' in p)) continue;
-    const key = `space-ring-${pi}`;
-    if (!existingDiffs.some(d => d.key === key)) {
-      candidates.push({
-        key, scene,
-        x: p.x - SCENE_W / 2,
-        y: p.y,
-        hitX: () => p.x,
-        hitY: () => p.y,
-        hitW: p.r * 3,
-        hitH: p.r * 2,
-        apply: () => { p.hasRing = !p.hasRing; },
-        hint: 'Planet ring toggled',
-      });
-    }
-  }
-
-  // Move an alien
-  if (scene.aliens) {
-    for (let ai = 0; ai < scene.aliens.length; ai++) {
-      const a = scene.aliens[ai];
-      const key = `space-alien-${ai}`;
-      if (!existingDiffs.some(d => d.key === key)) {
-        candidates.push({
-          key, scene,
-          x: a.x - SCENE_W / 2,
-          y: a.y,
-          hitX: () => a.x,
-          hitY: () => a.y,
-          hitW: a.size * 2 + 10,
-          hitH: a.size * 2 + 10,
-          apply: () => { a.x = Math.max(30, Math.min(SCENE_W - 30, a.x + rand(-50, 50))); },
-          hint: 'Alien moved',
-        });
-      }
-    }
-  }
-
-  if (candidates.length === 0) return null;
-  return pickRandom(candidates);
-}
-
-// ── Render a scene object using its own draw method or generic draw ──
-function drawScene(ctx, scene, ox, oy) {
-  if (scene.draw) {
-    scene.draw(ctx, ox, oy);
+    ctx.drawImage(img, sx, sy, sw, sh, ox, oy, SCENE_W, SCENE_H);
   } else {
-    // Plain object — use auto-detect
-    const isCity = 'buildings' in scene;
-    const isWater = 'fishes' in scene;
-    const isSpace = 'planets' in scene;
-
-    // We need generic draw functions for each. Let's extract them.
-    // For simplicity, if it's a class instance use the method.
-    // Since we deep-cloned, they're plain objects.
-    // Let's just use the class draw by constructing temp instances.
-    // OR: attach draw functions to scenes.
-    // For now, this shouldn't happen because we always use class instances for left.
-    // Right may be a clone, but draw functions got stripped by JSON.
-    // We need a different approach.
+    // Fallback: gradient placeholder
+    const grad = ctx.createLinearGradient(ox, oy, ox, oy + SCENE_H);
+    grad.addColorStop(0, '#1a1a3a');
+    grad.addColorStop(1, '#2a2a50');
+    ctx.fillStyle = grad;
+    ctx.fillRect(ox, oy, SCENE_W, SCENE_H);
+    ctx.fillStyle = '#555577';
+    ctx.font = '24px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Loading…', ox + SCENE_W / 2, oy + SCENE_H / 2);
   }
 }
 
-// ── Draw a scene (handles both class instances and plain objects) ──
-function drawSceneGeneric(ctx, scene, ox, oy) {
-  if (typeof scene.draw === 'function') {
-    scene.draw(ctx, ox, oy);
-    return;
-  }
-
-  // Auto-detect type from properties
-  if (scene.buildings) {
-    drawCityPlain(ctx, scene, ox, oy);
-  } else if (scene.fishes) {
-    drawWaterPlain(ctx, scene, ox, oy);
-  } else if (scene.planets) {
-    drawSpacePlain(ctx, scene, ox, oy);
-  }
-}
-
-function drawCityPlain(ctx, scene, ox, oy) {
-  const x = ox, y = oy;
-
-  const grad = ctx.createLinearGradient(x, y, x, y + SCENE_H);
-  grad.addColorStop(0, '#0a0a20');
-  grad.addColorStop(0.5, '#1a1a3a');
-  grad.addColorStop(1, '#2a2a4a');
-  ctx.fillStyle = grad;
-  ctx.fillRect(x, y, SCENE_W, SCENE_H);
-
-  if (scene.stars) {
-    for (const s of scene.stars) {
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(x + s.x, y + s.y, s.size, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  if (scene.moonX !== undefined) {
-    ctx.fillStyle = '#99aacc';
-    ctx.shadowColor = '#99aacc';
-    ctx.shadowBlur = 30;
-    ctx.beginPath();
-    ctx.arc(x + scene.moonX, y + scene.moonY, 30, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.shadowBlur = 0;
-  }
-
-  if (scene.clouds) {
-    for (const c of scene.clouds) {
-      ctx.fillStyle = '#334466';
-      ctx.globalAlpha = 0.6;
-      ctx.beginPath();
-      ctx.ellipse(x + c.x, y + c.y, c.w / 2, c.h / 2, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.ellipse(x + c.x - c.w * 0.25, y + c.y + 5, c.w * 0.3, c.h * 0.4, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.ellipse(x + c.x + c.w * 0.25, y + c.y + 5, c.w * 0.3, c.h * 0.4, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
-    }
-  }
-
-  if (scene.buildings) {
-    for (const b of scene.buildings) {
-      ctx.fillStyle = b.color;
-      ctx.fillRect(x + b.x, y + b.y, b.w, b.h);
-      ctx.strokeStyle = 'rgba(100,100,180,0.3)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(x + b.x, y + b.y, b.w, b.h);
-      if (b.windows) {
-        for (const w of b.windows) {
-          ctx.fillStyle = w.on ? w.color : '#111122';
-          ctx.fillRect(x + w.x, y + w.y, 10, 12);
-        }
-      }
-    }
-  }
-
-  if (scene.groundY !== undefined) {
-    ctx.fillStyle = '#1a1a30';
-    ctx.fillRect(x, y + scene.groundY, SCENE_W, SCENE_H - scene.groundY);
-    ctx.strokeStyle = '#2a2a44';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(x, y + scene.groundY + 2);
-    ctx.lineTo(x + SCENE_W, y + scene.groundY + 2);
-    ctx.stroke();
-  }
-}
-
-function drawWaterPlain(ctx, scene, ox, oy) {
-  const x = ox, y = oy;
-
-  const grad = ctx.createLinearGradient(x, y, x, y + SCENE_H);
-  grad.addColorStop(0, '#0a1a2a');
-  grad.addColorStop(0.3, '#0d2137');
-  grad.addColorStop(0.6, '#0f2844');
-  grad.addColorStop(1, '#152a40');
-  ctx.fillStyle = grad;
-  ctx.fillRect(x, y, SCENE_W, SCENE_H);
-
-  ctx.globalAlpha = 0.05;
-  for (let i = 0; i < 5; i++) {
-    ctx.fillStyle = '#88ccff';
-    const rx = rand(50, SCENE_W - 50);
-    ctx.beginPath();
-    ctx.moveTo(x + rx, y);
-    ctx.lineTo(x + rx - 30, y + SCENE_H);
-    ctx.lineTo(x + rx + 30, y + SCENE_H);
-    ctx.closePath();
-    ctx.fill();
-  }
-  ctx.globalAlpha = 1;
-
-  if (scene.seaweeds) {
-    for (const sw of scene.seaweeds) {
-      ctx.strokeStyle = sw.color;
-      ctx.lineWidth = 8;
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(x + sw.x, y + sw.y + sw.h);
-      for (let s = 0; s <= sw.segments; s++) {
-        const sy = y + sw.y + sw.h - (sw.h / sw.segments) * s;
-        const sx = x + sw.x + Math.sin(rand(0, 6.28)) * 10;
-        ctx.lineTo(sx, sy);
-      }
-      ctx.stroke();
-    }
-  }
-
-  if (scene.bubbles) {
-    for (const b of scene.bubbles) {
-      ctx.strokeStyle = '#88ccff';
-      ctx.fillStyle = 'rgba(136,204,255,0.15)';
-      ctx.globalAlpha = b.alpha || 0.4;
-      ctx.beginPath();
-      ctx.arc(x + b.x, y + b.y, b.r, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  if (scene.rocks) {
-    for (const r of scene.rocks) {
-      ctx.fillStyle = r.color;
-      ctx.beginPath();
-      ctx.ellipse(x + r.x, y + r.y, r.w / 2, r.h / 2, 0, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  if (scene.fishes) {
-    for (const f of scene.fishes) {
-      ctx.fillStyle = f.color;
-      const fx = x + f.x;
-      const fy = y + f.y;
-      const dir = f.dir || 1;
-      ctx.beginPath();
-      ctx.ellipse(fx, fy, f.size, f.size * 0.5, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.moveTo(fx - f.size * dir, fy);
-      ctx.lineTo(fx - f.size * 1.5 * dir, fy - f.size * 0.5);
-      ctx.lineTo(fx - f.size * 1.5 * dir, fy + f.size * 0.5);
-      ctx.closePath();
-      ctx.fill();
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(fx + dir * f.size * 0.3, fy - f.size * 0.1, f.size * 0.15, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#000000';
-      ctx.beginPath();
-      ctx.arc(fx + dir * f.size * 0.3, fy - f.size * 0.1, f.size * 0.07, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  if (scene.sandY !== undefined) {
-    ctx.fillStyle = '#1a2a33';
-    ctx.fillRect(x, y + scene.sandY, SCENE_W, SCENE_H - scene.sandY);
-  }
-}
-
-function drawSpacePlain(ctx, scene, ox, oy) {
-  const x = ox, y = oy;
-
-  ctx.fillStyle = '#050510';
-  ctx.fillRect(x, y, SCENE_W, SCENE_H);
-
-  if (scene.nebulae) {
-    for (const n of scene.nebulae) {
-      const grad = ctx.createRadialGradient(x + n.x, y + n.y, 0, x + n.x, y + n.y, n.r);
-      grad.addColorStop(0, n.color.replace(')', `, ${n.alpha || 0.08})`).replace('rgb', 'rgba'));
-      grad.addColorStop(1, 'rgba(5,5,16,0)');
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(x + n.x, y + n.y, n.r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  if (scene.stars) {
-    for (const s of scene.stars) {
-      ctx.fillStyle = '#ffffff';
-      ctx.globalAlpha = 0.5 + Math.sin(s.twinkle || 0) * 0.4;
-      ctx.beginPath();
-      ctx.arc(x + s.x, y + s.y, s.size, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  if (scene.planets) {
-    for (const p of scene.planets) {
-      ctx.fillStyle = p.color;
-      ctx.shadowColor = p.color;
-      ctx.shadowBlur = 25;
-      ctx.beginPath();
-      ctx.arc(x + p.x, y + p.y, p.r, 0, Math.PI * 2);
-      ctx.fill();
-
-      if (p.hasRing) {
-        ctx.shadowBlur = 0;
-        ctx.strokeStyle = p.color;
-        ctx.lineWidth = 3;
-        ctx.globalAlpha = 0.6;
-        ctx.beginPath();
-        ctx.ellipse(x + p.x, y + p.y, p.r * 1.6, p.r * 0.3, -0.3, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-      }
-      ctx.shadowBlur = 0;
-    }
-  }
-
-  if (scene.aliens) {
-    for (const a of scene.aliens) {
-      ctx.fillStyle = '#66ff66';
-      ctx.shadowColor = '#66ff66';
-      ctx.shadowBlur = 10;
-      ctx.beginPath();
-      ctx.ellipse(x + a.x, y + a.y, a.size, a.size * 0.7, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#000000';
-      ctx.shadowBlur = 0;
-      ctx.beginPath();
-      ctx.arc(x + a.x - a.size * 0.3, y + a.y - a.size * 0.15, a.size * 0.15, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(x + a.x + a.size * 0.3, y + a.y - a.size * 0.15, a.size * 0.15, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(x + a.x - a.size * 0.3, y + a.y - a.size * 0.15, a.size * 0.06, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(x + a.x + a.size * 0.3, y + a.y - a.size * 0.15, a.size * 0.06, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-    }
-  }
-}
-
-// ── Game Module ──
+// ── Game module ──
 
 const spotTheDifference = {
   name: 'Spot the Difference',
-  description: 'Find 5 differences between two pictures before time runs out!',
+  description: 'Find 5 changes between two real photos. 60 seconds. Go!',
 
-  async init(canvas, ctx) {
-    leftScene = null;
-    rightScene = null;
-    differences = [];
-    foundIndices = [];
-    foundParticles = [];
-    wrongFlash = 0;
-    warningFlash = 0;
-    splashTimer = 2.0;
-    lastTickSecond = -1;
+  async init() {
+    photoImg        = null;
+    photoUrl        = '';
+    differences     = [];
+    foundParticles  = [];
+    wrongFlash      = 0;
+    warningFlash    = 0;
+    splashTimer     = 2.0;
+    lastTickSecond  = -1;
+    loadError       = null;
 
     setGameData({
       score: 0,
@@ -1214,6 +329,19 @@ const spotTheDifference = {
       wrongTaps: 0,
       gameOver: false,
       won: false,
+      loading: true,
+    });
+
+    // Kick off photo load (does not block splash)
+    generateRound().then(ok => {
+      const data = getGameData();
+      data.loading = false;
+      if (ok) {
+        data.total = differences.length;
+      } else {
+        data.total = 0;
+      }
+      setGameData(data);
     });
   },
 
@@ -1221,43 +349,43 @@ const spotTheDifference = {
     const data = getGameData();
     if (data.gameOver) return;
 
-    // Splash timer
+    // Splash countdown
     if (splashTimer > 0) {
       splashTimer -= dt;
       return;
     }
 
-    // Decrease timer
-    data.timeRemaining -= dt;
+    // Wait for photo to load — timer paused
+    if (data.loading) return;
 
-    // Tick sound every second in last 10
-    const currentSec = Math.floor(data.timeRemaining);
-    if (currentSec >= 0 && currentSec <= 10 && currentSec !== lastTickSecond) {
-      if (currentSec > 0 || data.timeRemaining > 0) {
-        AudioManager.playTick();
-        warningFlash = 0.3;
-      }
-      lastTickSecond = currentSec;
+    // No diffs loaded (load failure) — bail to results
+    if (differences.length === 0) {
+      data.gameOver = true;
+      data.won = false;
+      pushScreen('results');
+      return;
     }
 
-    // Warning flash fade
-    if (warningFlash > 0) warningFlash -= dt;
+    data.timeRemaining -= dt;
 
-    // Wrong flash fade
+    const curSec = Math.floor(data.timeRemaining);
+    if (curSec >= 0 && curSec <= 10 && curSec !== lastTickSecond) {
+      AudioManager.playTick();
+      warningFlash = 0.3;
+      lastTickSecond = curSec;
+    }
+    if (warningFlash > 0) warningFlash -= dt;
     if (wrongFlash > 0) wrongFlash -= dt;
 
-    // Update found particles
+    // Particle lifecycle
     for (let i = foundParticles.length - 1; i >= 0; i--) {
       const p = foundParticles[i];
       p.life -= dt;
-      p.radius += dt * 60;
+      p.radius += dt * 70;
       p.alpha = Math.max(0, p.life / p.maxLife);
-      if (p.life <= 0) {
-        foundParticles.splice(i, 1);
-      }
+      if (p.life <= 0) foundParticles.splice(i, 1);
     }
 
-    // Check time up
     if (data.timeRemaining <= 0) {
       data.timeRemaining = 0;
       data.gameOver = true;
@@ -1276,172 +404,119 @@ const spotTheDifference = {
 
     // Splash screen
     if (splashTimer > 0) {
-      ctx.fillStyle = 'rgba(10,10,15,0.9)';
-      ctx.fillRect(0, 0, 1080, 1920);
-
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-
-      ctx.shadowColor = PALETTE.neonCyan;
-      ctx.shadowBlur = 60;
-      ctx.fillStyle = PALETTE.neonCyan;
-      ctx.font = 'bold 72px "Courier New", monospace';
-      ctx.fillText('SPOT THE', 540, 700);
-      ctx.shadowColor = PALETTE.neonPink;
-      ctx.shadowBlur = 60;
-      ctx.fillStyle = PALETTE.neonPink;
-      ctx.fillText('DIFFERENCE!', 540, 800);
-      ctx.shadowBlur = 0;
-
-      ctx.fillStyle = PALETTE.white;
-      ctx.font = '36px "Courier New", monospace';
-      ctx.fillText(`Find ${TOTAL_DIFFERENCES} differences in ${TIME_LIMIT} seconds`, 540, 950);
-      ctx.fillStyle = PALETTE.dim;
-      ctx.font = '28px "Courier New", monospace';
-      ctx.fillText('Wrong taps cost 5 seconds!', 540, 1030);
-
-      // Countdown
-      const count = Math.ceil(splashTimer);
-      ctx.fillStyle = PALETTE.neonAmber;
-      ctx.font = 'bold 160px "Courier New", monospace';
-      ctx.fillText(count, 540, 1250);
-
+      drawSplash(ctx);
       return;
     }
 
-    // Draw scenes side by side
-    if (leftScene) {
-      drawSceneGeneric(ctx, leftScene, SCENE_X, SCENE_TOP);
-    }
-    if (rightScene) {
-      drawSceneGeneric(ctx, rightScene, SCENE2_X, SCENE_TOP);
+    // Loading photo (after splash, before photo ready)
+    if (data.loading || !photoImg) {
+      drawLoading(ctx, data);
+      return;
     }
 
-    // Divider line
+    // ── Draw both sides ──
+    // Left: clean photo
+    drawPhoto(ctx, photoImg, SCENE_X_LEFT, SCENE_Y);
+    // Right: photo + modifications
+    drawPhoto(ctx, photoImg, SCENE_X_RIGHT, SCENE_Y);
+    for (const mod of differences) {
+      drawMod(ctx, mod, SCENE_X_RIGHT, SCENE_Y);
+    }
+
+    // Divider
     ctx.strokeStyle = PALETTE.dim;
     ctx.lineWidth = 1;
     ctx.setLineDash([8, 8]);
     ctx.beginPath();
-    ctx.moveTo(540, SCENE_TOP);
-    ctx.lineTo(540, SCENE_TOP + SCENE_H);
+    ctx.moveTo(540, SCENE_Y - 10);
+    ctx.lineTo(540, SCENE_Y + SCENE_H + 10);
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // "LEFT" / "RIGHT" labels
+    // Side labels
     ctx.fillStyle = PALETTE.dim;
     ctx.textAlign = 'center';
-    ctx.font = '18px "Courier New", monospace';
-    ctx.fillText('LEFT', 280, SCENE_TOP + SCENE_H + 30);
-    ctx.fillText('RIGHT', 800, SCENE_TOP + SCENE_H + 30);
+    ctx.font = '22px "Courier New", monospace';
+    ctx.fillText('REFERENCE', SCENE_X_LEFT + SCENE_W / 2, SCENE_Y - 14);
+    ctx.fillText('FIND CHANGES', SCENE_X_RIGHT + SCENE_W / 2, SCENE_Y - 14);
 
-    // Found difference highlights on RIGHT scene only
-    for (let i = 0; i < foundIndices.length; i++) {
-      const diff = differences[foundIndices[i]];
-      if (!diff) continue;
-      const hx = diff.hitX();
-      const hy = diff.hitY();
+    // Photo credits (required by Picsum terms)
+    ctx.fillStyle = '#444466';
+    ctx.font = '14px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Photos: Picsum / Unsplash (CC0)', 540, SCENE_Y + SCENE_H + 26);
+    ctx.fillText(`Category: ${categoryId}`, 540, SCENE_Y + SCENE_H + 46);
 
-      // Highlight circle on both scenes
-      for (const sceneX of [SCENE_X, SCENE2_X]) {
-        ctx.strokeStyle = PALETTE.neonGreen;
-        ctx.lineWidth = 3;
-        ctx.shadowColor = PALETTE.neonGreen;
-        ctx.shadowBlur = 15;
-        const cx = sceneX + hx;
-        const cy = SCENE_TOP + hy;
-        ctx.beginPath();
-        ctx.arc(cx + diff.hitW / 2, cy + diff.hitH / 2 - diff.hitH * 0.2, 20, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-
-        // X mark
-        ctx.strokeStyle = PALETTE.neonGreen;
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(cx - 8, cy - 8);
-        ctx.lineTo(cx + 8, cy + 8);
-        ctx.moveTo(cx + 8, cy - 8);
-        ctx.lineTo(cx - 8, cy + 8);
-        ctx.stroke();
-      }
+    // Found-difference highlights (green circle + checkmark on both sides)
+    for (const mod of differences) {
+      if (!mod.found) continue;
+      drawFoundHighlight(ctx, mod, SCENE_X_LEFT, SCENE_Y);
+      drawFoundHighlight(ctx, mod, SCENE_X_RIGHT, SCENE_Y);
     }
 
-    // Draw found particles
+    // Found particles
     for (const p of foundParticles) {
       ctx.globalAlpha = p.alpha;
       ctx.strokeStyle = PALETTE.neonGreen;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
 
-    // Wrong tap flash overlay
+    // Wrong-tap red flash
     if (wrongFlash > 0) {
       ctx.fillStyle = `rgba(255, 51, 85, ${wrongFlash * 0.5})`;
       ctx.fillRect(0, 0, 1080, 1920);
     }
 
-    // Low time warning
+    // Low-time border warning
     if (data.timeRemaining <= 10 && warningFlash > 0) {
-      const alpha = Math.sin(Date.now() / 150) * 0.15 + 0.15;
-      ctx.fillStyle = `rgba(255, 51, 85, ${alpha})`;
-      ctx.fillRect(0, 0, 1080, SCENE_TOP);
-      ctx.fillRect(0, 0, SCENE_X, 1920);
-      ctx.fillRect(1080 - 30, 0, 30, 1920);
+      const a = Math.sin(Date.now() / 150) * 0.12 + 0.12;
+      ctx.fillStyle = `rgba(255, 51, 85, ${a})`;
+      ctx.fillRect(0, 0, 1080, SCENE_Y);
     }
   },
 
   handlePointer(x, y) {
     const data = getGameData();
-    if (data.gameOver || splashTimer > 0) return;
-    if (!leftScene || !rightScene) return;
+    if (data.gameOver || splashTimer > 0 || data.loading) return;
+    if (!photoImg || differences.length === 0) return;
 
-    // Check if tap is within either scene area
-    const inLeftScene = x >= SCENE_X && x <= SCENE_X + SCENE_W && y >= SCENE_TOP && y <= SCENE_TOP + SCENE_H;
-    const inRightScene = x >= SCENE2_X && x <= SCENE2_X + SCENE_W && y >= SCENE_TOP && y <= SCENE_TOP + SCENE_H;
+    // Tap must be inside one of the photo areas
+    const inLeft  = x >= SCENE_X_LEFT  && x <= SCENE_X_LEFT  + SCENE_W &&
+                    y >= SCENE_Y       && y <= SCENE_Y       + SCENE_H;
+    const inRight = x >= SCENE_X_RIGHT && x <= SCENE_X_RIGHT + SCENE_W &&
+                    y >= SCENE_Y       && y <= SCENE_Y       + SCENE_H;
+    if (!inLeft && !inRight) return;
 
-    if (!inLeftScene && !inRightScene) return;
-
-    // Determine which scene was tapped and get relative coordinates
-    const sceneX = inLeftScene ? SCENE_X : SCENE2_X;
+    const sceneX = inLeft ? SCENE_X_LEFT : SCENE_X_RIGHT;
     const relX = x - sceneX;
-    const relY = y - SCENE_TOP;
+    const relY = y - SCENE_Y;
 
-    // Check if tap is near any unfound difference
+    // Check hits
     let hitIndex = -1;
     for (let i = 0; i < differences.length; i++) {
-      if (foundIndices.includes(i)) continue;
-      const diff = differences[i];
-      const dx = diff.hitX();
-      const dy = diff.hitY();
-      const hw = diff.hitW / 2;
-      const hh = diff.hitH / 2;
-
-      if (relX >= dx - hw && relX <= dx + hw &&
-          relY >= dy - hh && relY <= dy + hh) {
+      const mod = differences[i];
+      if (mod.found) continue;
+      const dx = relX - mod.x;
+      const dy = relY - mod.y;
+      if (dx * dx + dy * dy <= mod.hitR * mod.hitR) {
         hitIndex = i;
         break;
       }
     }
 
     if (hitIndex >= 0) {
-      // Correct!
-      const diff = differences[hitIndex];
-      foundIndices.push(hitIndex);
-      foundIndices.sort((a, b) => a - b);
-
-      data.found = foundIndices.length;
+      const mod = differences[hitIndex];
+      mod.found = true;
+      data.found = differences.filter(d => d.found).length;
       data.score += SCORE_CORRECT;
 
-      // Apply visual change to right scene
-      diff.apply();
-
-      // Particle effect
       foundParticles.push({
-        x: sceneX + diff.hitX() + diff.hitW / 2,
-        y: SCENE_TOP + diff.hitY() + diff.hitH / 2,
+        x: sceneX + mod.x,
+        y: SCENE_Y + mod.y,
         radius: 10,
         life: 1.0,
         maxLife: 1.0,
@@ -1450,18 +525,15 @@ const spotTheDifference = {
 
       AudioManager.playCorrect();
 
-      // Check win
       if (data.found >= data.total) {
         data.gameOver = true;
         data.won = true;
-        // Time bonus
-        const timeBonus = Math.floor(data.timeRemaining * SCORE_BONUS_MULT);
-        data.score += timeBonus;
+        const bonus = Math.floor(data.timeRemaining * SCORE_BONUS_MULT);
+        data.score += bonus;
         AudioManager.playVictory();
         pushScreen('results');
       }
     } else {
-      // Wrong tap — penalty
       data.timeRemaining -= PENALTY_TIME;
       data.wrongTaps++;
       wrongFlash = 0.3;
@@ -1480,82 +552,99 @@ const spotTheDifference = {
   },
 
   cleanup() {
-    leftScene = null;
-    rightScene = null;
+    photoImg = null;
+    photoUrl = '';
     differences = [];
-    foundIndices = [];
     foundParticles = [];
     wrongFlash = 0;
-  },
-
-  // Called after every splash to transition into actual gameplay
-  _onSplashDone() {
-    const pair = generateRound();
-    leftScene = pair.left;
-    rightScene = pair.right;
-
-    // Generate differences on the right scene
-    differences = [];
-    const usedKeys = new Set();
-    for (let i = 0; i < TOTAL_DIFFERENCES; i++) {
-      const diff = mutateScene(rightScene, differences);
-      if (diff) {
-        differences.push(diff);
-        usedKeys.add(diff.key);
-      } else {
-        // Fill remaining with simpler differences
-        break;
-      }
-    }
-
-    setGameData({
-      found: 0,
-      total: differences.length,
-    });
-
-    // Debug log
-    console.log(`Spot the Difference: Generated ${differences.length} differences`);
+    loadError = null;
   },
 };
 
-// Override update to handle splash -> game transition
-const origUpdate = spotTheDifference.update;
-spotTheDifference.update = function(dt) {
-  const data = getGameData();
+// ── Drawing helpers ──
+function drawSplash(ctx) {
+  ctx.fillStyle = 'rgba(10,10,15,0.92)';
+  ctx.fillRect(0, 0, 1080, 1920);
 
-  if (splashTimer > 0) {
-    splashTimer -= dt;
-    if (splashTimer <= 0) {
-      // Splash done, generate the scenes
-      const pair = generateRound();
-      leftScene = pair.left;
-      rightScene = pair.right;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
 
-      differences = [];
-      for (let i = 0; i < TOTAL_DIFFERENCES; i++) {
-        const diff = mutateScene(rightScene, differences);
-        if (diff) {
-          differences.push(diff);
-        } else {
-          // Not enough candidates — shouldn't happen with 5 diffs but just in case
-          console.warn('Only generated', differences.length, 'differences');
-          break;
-        }
-      }
+  ctx.shadowColor = PALETTE.neonCyan;
+  ctx.shadowBlur = 60;
+  ctx.fillStyle = PALETTE.neonCyan;
+  ctx.font = 'bold 72px "Courier New", monospace';
+  ctx.fillText('PHOTO', 540, 600);
+  ctx.shadowColor = PALETTE.neonPink;
+  ctx.shadowBlur = 60;
+  ctx.fillStyle = PALETTE.neonPink;
+  ctx.fillText('HUNT', 540, 720);
+  ctx.shadowBlur = 0;
 
-      setGameData({
-        found: 0,
-        total: differences.length,
-      });
-    }
-    return;
+  ctx.fillStyle = PALETTE.white;
+  ctx.font = '36px "Courier New", monospace';
+  ctx.fillText(`Find ${TOTAL_DIFFERENCES} changes in ${TIME_LIMIT} seconds`, 540, 870);
+
+  ctx.fillStyle = PALETTE.dim;
+  ctx.font = '28px "Courier New", monospace';
+  ctx.fillText('Wrong taps cost 5 seconds!', 540, 940);
+
+  const count = Math.ceil(splashTimer);
+  ctx.fillStyle = PALETTE.neonAmber;
+  ctx.font = 'bold 200px "Courier New", monospace';
+  ctx.fillText(count, 540, 1280);
+
+  ctx.fillStyle = PALETTE.dim;
+  ctx.font = '22px "Courier New", monospace';
+  ctx.fillText('Loading photo…', 540, 1500);
+}
+
+function drawLoading(ctx, data) {
+  // Semi-transparent dark overlay so user sees what's behind
+  ctx.fillStyle = 'rgba(10,10,15,0.85)';
+  ctx.fillRect(0, 0, 1080, 1920);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = PALETTE.white;
+  ctx.font = 'bold 48px "Courier New", monospace';
+  ctx.fillText('LOADING PHOTO…', 540, 900);
+
+  if (loadError) {
+    ctx.fillStyle = PALETTE.red;
+    ctx.font = '24px "Courier New", monospace';
+    ctx.fillText('Photo failed to load — ending round', 540, 980);
+  } else {
+    // Spinner
+    const t = Date.now() / 200;
+    ctx.strokeStyle = PALETTE.neonCyan;
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.arc(540, 1100, 60, t, t + Math.PI * 1.4);
+    ctx.stroke();
   }
+}
 
-  // Call original update
-  if (typeof origUpdate === 'function') {
-    origUpdate.call(spotTheDifference, dt);
-  }
-};
+function drawFoundHighlight(ctx, mod, ox, oy) {
+  const cx = ox + mod.x;
+  const cy = oy + mod.y;
+  ctx.strokeStyle = PALETTE.neonGreen;
+  ctx.lineWidth = 4;
+  ctx.shadowColor = PALETTE.neonGreen;
+  ctx.shadowBlur = 18;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 28, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Checkmark
+  ctx.lineWidth = 5;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(cx - 12, cy);
+  ctx.lineTo(cx - 3, cy + 9);
+  ctx.lineTo(cx + 14, cy - 10);
+  ctx.stroke();
+}
 
 // Register with engine
 registerGame(spotTheDifference);

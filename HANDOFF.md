@@ -128,14 +128,28 @@ update, hard-refresh (Ctrl+Shift+R).
   screen stack (menu/playing/results), HUD, scoring data via get/setGameData.
 - Game end: set `gameData.gameOver = true`, `gameData.won`, then `pushScreen('results')`.
 
-## Known Remaining Polish Items (not bugs)
+## Photo System (v2 — 2026-09-06)
 
-- Differences can spawn close together or in visually noisy areas (small windows);
-  could enforce a minimum spacing / minimum visual salience.
-- Grid-tap testing found only 1/5 diffs before time ran out — hitboxes are small
-  (10-20px logical). Consider enlarging `hitW`/`hitH` for touch friendliness
-  (fingers are ~40-60 logical px wide on a 1080-wide portrait screen).
-- The left/right scenes are drawn by different code paths (class method vs plain-object
-  functions) — duplicated drawing logic; consolidating to one path would prevent drift.
-- `drawScene()` (unused, half-written) still in the file; `drawSceneGeneric()` is
-  the real one. Safe to delete `drawScene()`.
+The procedural stick-figure scenes were replaced with **real stock photos** from
+Picsum (served by Unsplash, CC0/free for commercial use). 96 photos in 10 themed
+categories are pre-downloaded to `assets/photos/` via `scripts/download-photos.sh`.
+
+- `js/photo-loader.js` — module that loads local photos with caching
+- `js/games/spot-the-difference.js` — uses one photo, draws it on both sides, then
+  overlays 5 of 10 modification types on the right side
+- Modifications: red dot, yellow square, blue X, green triangle, cyan circle, pink
+  star (geometric), and invert/darken/brighten/hue_shift patches (photo effects)
+- Photo effects (invert etc.) require `getImageData`, which needs same-origin
+  assets — hence the move from picsum.photos to local files
+
+## Known Remaining Polish Items
+
+- Photos downloaded from Picsum are somewhat random per seed — the themed
+  category labels don't guarantee the photo content matches (e.g. "food:pizza"
+  may not be pizza). For tighter curation, hand-pick seeds and replace the
+  curl script with a static list.
+- `drawScene()` (unused, half-written) still in the file from the procedural
+  version; safe to delete.
+- The procedural fallback system remains in code (`drawPhoto` shows a gradient
+  placeholder if the image fails to load) — good safety net but never exercised
+  in testing because local loads are instant.
