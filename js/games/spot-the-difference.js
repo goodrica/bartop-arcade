@@ -1,37 +1,63 @@
 /* ============================================
-   Bartop Arcade - Spot the Difference
+   Bartop Arcade - Photo Hunt (Spot the Difference)
    ============================================
-   Inspired by Megatouch's "Photo Hunt".
-   Uses real stock photos from Picsum (free
-   for commercial use, served from Unsplash).
-   One photo on each side; 5 visible
-   modifications on the right.
+   Inspired by Megatouch's "Photo Hunt" (called
+   "PixMix" on later systems).
+
+   Two different photographs from the same
+   category are shown side-by-side. The right
+   photo has 5 subtle, photo-realistic
+   modifications applied to it. The user must
+   tap each difference.
+
+   Differences are natural-looking photo
+   effects (NOT overlaid shapes): brightness
+   patches, hue shifts, blurred regions, and
+   simulated "missing details." No borders,
+   no markers — the photo itself changes.
    ============================================ */
 
 import { AudioManager } from '../audio.js';
 import { registerGame, getGameData, setGameData, pushScreen } from '../engine.js';
 import { PALETTE } from '../engine.js';
-import { loadPhotosByCategory, randomCategoryId } from '../photo-loader.js';
+import { loadPhotosByCategory, randomCategoryId, clearCache } from '../photo-loader.js';
 
-// ── Layout constants ──
-const SCENE_X_LEFT  = 30;
-const SCENE_X_RIGHT = 540;
-const SCENE_Y       = 160;
-const SCENE_W       = 510;
+// ── Layout (logical canvas pixels, 1080x1920 portrait) ──
+const SCENE_W       = 500;
 const SCENE_H       = 900;
+const SCENE_Y       = 160;
+const SCENE_X_LEFT  = 40;
+const SCENE_X_RIGHT = 540;
 
 const TOTAL_DIFFERENCES = 5;
 const TIME_LIMIT        = 60;
 const PENALTY_TIME      = 5;
 const SCORE_CORRECT     = 100;
 const SCORE_BONUS_MULT  = 2;
-const PHOTO_HIT_RADIUS  = 50;   // logical pixels — generous for touch
+const PHOTO_HIT_RADIUS  = 55;    // generous for touch
+
+// ── Modification registry ──
+// Each type modifies actual photo pixels in a circular region on
+// the right photo. Effects are subtle enough that they look like
+// natural differences between two photos, not added shapes.
+const MOD_TYPES = [
+  { type: 'brighten',   hint: 'Brighter region' },
+  { type: 'darken',     hint: 'Darker region' },
+  { type: 'saturate',   hint: 'More saturated region' },
+  { type: 'desaturate', hint: 'Less saturated region' },
+  { type: 'hue_warm',   hint: 'Warmer color region' },
+  { type: 'hue_cool',   hint: 'Cooler color region' },
+  { type: 'blur_patch', hint: 'Blurred region' },
+  { type: 'sharpen',    hint: 'Sharper region' },
+];
 
 // ── Per-round state ──
-let photoImg        = null;     // HTMLImageElement (shared left/right)
-let photoUrl        = '';       // for credits
+let leftImg         = null;   // Reference photo (untouched)
+let rightImg        = null;   // Modified photo (with differences)
+let rightCanvas     = null;   // Off-screen canvas with the modified copy
+let rightCtx        = null;   // 2D context for rightCanvas
 let categoryId      = '';
-let differences     = [];       // [{type, x, y, hitW, hitH, hitR, found, apply, hint}]
+let differences     = [];     // [{x, y, r, found, hint, type}]
 let foundParticles  = [];
 let wrongFlash      = 0;
 let warningFlash    = 0;
@@ -39,45 +65,205 @@ let splashTimer     = 2.0;
 let lastTickSecond  = -1;
 let loadError       = null;
 
-// ── Modification registry ──
-// Each mod draws an overlay on the right photo AND contributes a hit zone.
-// `apply(ctx, ox, oy)` runs once during draw to render the overlay.
-// `hitPoint` is the logical point (relative to photo) the user must tap.
-// `hitRadius` is the touch hit zone radius.
-const MOD_TYPES = [
-  // Bright, easy-to-spot additions
-  { type: 'red_dot',       color: '#ff2244',  shape: 'circle',   size: 30, hint: 'Red dot' },
-  { type: 'yellow_square', color: '#ffdd00',  shape: 'square',   size: 50, hint: 'Yellow square' },
-  { type: 'blue_x',        color: '#2266ff',  shape: 'x',        size: 44, hint: 'Blue X' },
-  { type: 'green_tri',     color: '#33ee66',  shape: 'triangle', size: 50, hint: 'Green triangle' },
-  { type: 'cyan_circle',   color: '#00ddff',  shape: 'circle',   size: 28, hint: 'Cyan circle' },
-  { type: 'pink_star',     color: '#ff66cc',  shape: 'star',     size: 46, hint: 'Pink star' },
-  // Subtle photo modifications
-  { type: 'invert',        hint: 'Inverted patch' },
-  { type: 'darken',        hint: 'Darkened patch' },
-  { type: 'brighten',      hint: 'Brightened patch' },
-  { type: 'hue_shift',     hint: 'Color-shifted patch' },
-];
-
 function rand(min, max) { return min + Math.random() * (max - min); }
-function randInt(min, max) { return Math.floor(rand(min, max + 1)); }
 
-// ── Round generation ──
+// ── Color utilities (RGB <-> HSL) ──
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h, s, l = (max + min) / 2;
+  if (max === min) { h = s = 0; }
+  else {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      default: h = (r - g) / d + 4;
+    }
+    h *= 60;
+  }
+  return [h, s, l];
+}
+
+function hslToRgb(h, s, l) {
+  h = ((h % 360) + 360) % 360;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r, g, b;
+  if (h < 60)       [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else              [r, g, b] = [c, 0, x];
+  return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
+}
+
+// ── Photo modification operations ──
+// Each takes an ImageData region and modifies pixels.
+// All operations use a soft circular mask so the patch
+// blends into the surrounding photo (no sharp borders).
+function maskFalloff(distance, maxR) {
+  // Smooth falloff: 1 at center, 0 at edge
+  const t = Math.max(0, Math.min(1, 1 - distance / maxR));
+  return t * t * (3 - 2 * t); // smoothstep
+}
+
+function applyBrighten(data, cx, cy, radius, strength) {
+  for (let py = -radius; py <= radius; py++) {
+    for (let px = -radius; px <= radius; px++) {
+      const dist = Math.sqrt(px * px + py * py);
+      if (dist > radius) continue;
+      const x = cx + px, y = cy + py;
+      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
+      const i = (y * data.width + x) * 4;
+      const m = maskFalloff(dist, radius) * strength;
+      data.data[i]     = Math.min(255, data.data[i]     + 255 * m);
+      data.data[i + 1] = Math.min(255, data.data[i + 1] + 255 * m);
+      data.data[i + 2] = Math.min(255, data.data[i + 2] + 255 * m);
+    }
+  }
+}
+
+function applyDarken(data, cx, cy, radius, strength) {
+  for (let py = -radius; py <= radius; py++) {
+    for (let px = -radius; px <= radius; px++) {
+      const dist = Math.sqrt(px * px + py * py);
+      if (dist > radius) continue;
+      const x = cx + px, y = cy + py;
+      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
+      const i = (y * data.width + x) * 4;
+      const m = maskFalloff(dist, radius) * strength;
+      data.data[i]     = Math.max(0, data.data[i]     - 255 * m);
+      data.data[i + 1] = Math.max(0, data.data[i + 1] - 255 * m);
+      data.data[i + 2] = Math.max(0, data.data[i + 2] - 255 * m);
+    }
+  }
+}
+
+function applySaturation(data, cx, cy, radius, factor) {
+  for (let py = -radius; py <= radius; py++) {
+    for (let px = -radius; px <= radius; px++) {
+      const dist = Math.sqrt(px * px + py * py);
+      if (dist > radius) continue;
+      const x = cx + px, y = cy + py;
+      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
+      const i = (y * data.width + x) * 4;
+      const m = maskFalloff(dist, radius);
+      const r = data.data[i], g = data.data[i + 1], b = data.data[i + 2];
+      const [h, s, l] = rgbToHsl(r, g, b);
+      const newS = Math.max(0, Math.min(1, s * (1 + (factor - 1) * m)));
+      const [nr, ng, nb] = hslToRgb(h, newS, l);
+      data.data[i] = nr;
+      data.data[i + 1] = ng;
+      data.data[i + 2] = nb;
+    }
+  }
+}
+
+function applyHueShift(data, cx, cy, radius, degrees) {
+  for (let py = -radius; py <= radius; py++) {
+    for (let px = -radius; px <= radius; px++) {
+      const dist = Math.sqrt(px * px + py * py);
+      if (dist > radius) continue;
+      const x = cx + px, y = cy + py;
+      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
+      const i = (y * data.width + x) * 4;
+      const m = maskFalloff(dist, radius);
+      const r = data.data[i], g = data.data[i + 1], b = data.data[i + 2];
+      const [h, s, l] = rgbToHsl(r, g, b);
+      const newH = (h + degrees * m + 360) % 360;
+      const [nr, ng, nb] = hslToRgb(newH, s, l);
+      data.data[i] = nr;
+      data.data[i + 1] = ng;
+      data.data[i + 2] = nb;
+    }
+  }
+}
+
+// Box blur with smooth circular mask. Works on a copy to
+// avoid feedback loops (read original pixels, write back).
+function applyBlur(data, cx, cy, radius, strength) {
+  const samples = [];
+  for (let py = -radius; py <= radius; py++) {
+    for (let px = -radius; px <= radius; px++) {
+      const dist = Math.sqrt(px * px + py * py);
+      if (dist > radius) continue;
+      const x = cx + px, y = cy + py;
+      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
+      let r = 0, g = 0, b = 0, count = 0;
+      for (let oy = -2; oy <= 2; oy++) {
+        for (let ox = -2; ox <= 2; ox++) {
+          const sx = x + ox, sy = y + oy;
+          if (sx < 0 || sx >= data.width || sy < 0 || sy >= data.height) continue;
+          const si = (sy * data.width + sx) * 4;
+          r += data.data[si];
+          g += data.data[si + 1];
+          b += data.data[si + 2];
+          count++;
+        }
+      }
+      samples.push({ i: (y * data.width + x) * 4, r: r / count, g: g / count, b: b / count, dist });
+    }
+  }
+  // Write back
+  for (const s of samples) {
+    const m = maskFalloff(s.dist, radius) * strength;
+    data.data[s.i]     = data.data[s.i]     * (1 - m) + s.r * m;
+    data.data[s.i + 1] = data.data[s.i + 1] * (1 - m) + s.g * m;
+    data.data[s.i + 2] = data.data[s.i + 2] * (1 - m) + s.b * m;
+  }
+}
+
+// Local contrast boost (lighten highlights, darken shadows)
+function applySharpen(data, cx, cy, radius, strength) {
+  for (let py = -radius; py <= radius; py++) {
+    for (let px = -radius; px <= radius; px++) {
+      const dist = Math.sqrt(px * px + py * py);
+      if (dist > radius) continue;
+      const x = cx + px, y = cy + py;
+      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
+      const i = (y * data.width + x) * 4;
+      const m = maskFalloff(dist, radius) * strength;
+      for (let c = 0; c < 3; c++) {
+        const v = data.data[i + c];
+        // Pull toward 128 (mid gray) by negative amount = push away = sharpen
+        data.data[i + c] = v + (v - 128) * m * 0.8;
+      }
+    }
+  }
+}
+
+// ── Photo loading + modification ──
 async function generateRound() {
-  // Pick a category, load one photo
+  // Pick a category
   categoryId = randomCategoryId();
-  const imgs = await loadPhotosByCategory(categoryId, 1);
-  photoImg = imgs[0];
 
-  if (!photoImg) {
-    loadError = new Error(`Failed to load photo from category: ${categoryId}`);
+  // Load two photos from the same category
+  const imgs = await loadPhotosByCategory(categoryId, 2);
+  if (!imgs[0] || !imgs[1]) {
+    loadError = new Error(`Failed to load photos from category: ${categoryId}`);
     return false;
   }
 
+  leftImg = imgs[0];
+  rightImg = imgs[1];
   loadError = null;
-  photoUrl = `${categoryId} photo (Picsum/Unsplash)`;
 
-  // Pick 5 unique modification types from the registry
+  // Create off-screen canvas for the modified right photo
+  if (!rightCanvas) {
+    rightCanvas = document.createElement('canvas');
+  }
+  rightCanvas.width = SCENE_W;
+  rightCanvas.height = SCENE_H;
+  rightCtx = rightCanvas.getContext('2d', { willReadFrequently: true });
+
+  // Draw the right photo onto the off-screen canvas
+  drawPhotoCover(rightCtx, rightImg, SCENE_W, SCENE_H);
+
+  // Generate differences — pick 5 unique types
   const pool = [...MOD_TYPES];
   for (let i = pool.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -87,238 +273,111 @@ async function generateRound() {
 
   // Place each modification at a random point on the photo
   differences = chosen.map((mod, i) => {
-    const margin = 60;
-    const x = rand(margin, SCENE_W - margin);
-    const y = rand(margin, SCENE_H - margin);
+    const margin = 70;
     return {
       key: `${mod.type}-${i}-${Date.now()}`,
       type: mod.type,
-      color: mod.color,
-      shape: mod.shape,
-      size: mod.size,
       hint: mod.hint,
-      x, y,
-      hitR: PHOTO_HIT_RADIUS,
+      x: rand(margin, SCENE_W - margin),
+      y: rand(margin, SCENE_H - margin),
+      r: rand(45, 65),      // patch radius (visual)
+      hitR: PHOTO_HIT_RADIUS, // touch hit-zone radius (larger for fingers)
       found: false,
     };
   });
 
+  // Apply each modification to the off-screen canvas
+  for (const mod of differences) {
+    applyModification(mod);
+  }
+
   return true;
 }
 
-// ── Modification overlay drawing ──
-function drawMod(ctx, mod, ox, oy) {
-  const cx = ox + mod.x;
-  const cy = oy + mod.y;
+// Apply a single modification to the right canvas
+function applyModification(mod) {
+  const r = Math.ceil(mod.r);
+  const x0 = Math.max(0, Math.floor(mod.x - r));
+  const y0 = Math.max(0, Math.floor(mod.y - r));
+  const w  = Math.min(SCENE_W - x0, r * 2);
+  const h  = Math.min(SCENE_H - y0, r * 2);
 
-  ctx.save();
+  if (w <= 0 || h <= 0) return;
+
+  const imgData = rightCtx.getImageData(x0, y0, w, h);
+  // Position relative to imageData
+  const cx = mod.x - x0;
+  const cy = mod.y - y0;
 
   switch (mod.type) {
-    case 'red_dot':
-    case 'cyan_circle': {
-      // Filled circle with subtle glow
-      ctx.shadowColor = mod.color;
-      ctx.shadowBlur = 18;
-      ctx.fillStyle = mod.color;
-      ctx.beginPath();
-      ctx.arc(cx, cy, mod.size, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-      // Inner highlight
-      ctx.fillStyle = 'rgba(255,255,255,0.5)';
-      ctx.beginPath();
-      ctx.arc(cx - mod.size * 0.3, cy - mod.size * 0.3, mod.size * 0.25, 0, Math.PI * 2);
-      ctx.fill();
+    case 'brighten':
+      applyBrighten(imgData, cx, cy, r, 0.45);
       break;
-    }
-
-    case 'yellow_square': {
-      ctx.shadowColor = mod.color;
-      ctx.shadowBlur = 18;
-      ctx.fillStyle = mod.color;
-      ctx.fillRect(cx - mod.size / 2, cy - mod.size / 2, mod.size, mod.size);
-      ctx.shadowBlur = 0;
-      ctx.strokeStyle = '#000';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(cx - mod.size / 2, cy - mod.size / 2, mod.size, mod.size);
+    case 'darken':
+      applyDarken(imgData, cx, cy, r, 0.45);
       break;
-    }
-
-    case 'blue_x': {
-      ctx.shadowColor = mod.color;
-      ctx.shadowBlur = 14;
-      ctx.strokeStyle = mod.color;
-      ctx.lineWidth = 8;
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(cx - mod.size / 2, cy - mod.size / 2);
-      ctx.lineTo(cx + mod.size / 2, cy + mod.size / 2);
-      ctx.moveTo(cx + mod.size / 2, cy - mod.size / 2);
-      ctx.lineTo(cx - mod.size / 2, cy + mod.size / 2);
-      ctx.stroke();
-      ctx.shadowBlur = 0;
+    case 'saturate':
+      applySaturation(imgData, cx, cy, r, 1.7);
       break;
-    }
-
-    case 'green_tri': {
-      ctx.shadowColor = mod.color;
-      ctx.shadowBlur = 14;
-      ctx.fillStyle = mod.color;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy - mod.size / 2);
-      ctx.lineTo(cx + mod.size / 2, cy + mod.size / 2);
-      ctx.lineTo(cx - mod.size / 2, cy + mod.size / 2);
-      ctx.closePath();
-      ctx.fill();
-      ctx.shadowBlur = 0;
-      ctx.strokeStyle = '#003300';
-      ctx.lineWidth = 2;
-      ctx.stroke();
+    case 'desaturate':
+      applySaturation(imgData, cx, cy, r, 0.3);
       break;
-    }
-
-    case 'pink_star': {
-      ctx.shadowColor = mod.color;
-      ctx.shadowBlur = 16;
-      ctx.fillStyle = mod.color;
-      ctx.strokeStyle = '#660044';
-      ctx.lineWidth = 2;
-      const spikes = 5, outerR = mod.size / 2, innerR = mod.size / 4;
-      ctx.beginPath();
-      for (let i = 0; i < spikes * 2; i++) {
-        const r = i % 2 === 0 ? outerR : innerR;
-        const angle = (Math.PI / spikes) * i - Math.PI / 2;
-        const px = cx + Math.cos(angle) * r;
-        const py = cy + Math.sin(angle) * r;
-        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-      }
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.shadowBlur = 0;
+    case 'hue_warm':
+      applyHueShift(imgData, cx, cy, r, -15);  // shift toward red/orange
       break;
-    }
-
-    case 'invert': {
-      // Get pixels, invert them, put them back
-      const w = 80, h = 80;
-      const sx = cx - w / 2, sy = cy - h / 2;
-      try {
-        const imgData = ctx.getImageData(sx, sy, w, h);
-        const d = imgData.data;
-        for (let i = 0; i < d.length; i += 4) {
-          d[i]     = 255 - d[i];
-          d[i + 1] = 255 - d[i + 1];
-          d[i + 2] = 255 - d[i + 2];
-        }
-        ctx.putImageData(imgData, sx, sy);
-        // Border so it's findable
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 3;
-        ctx.setLineDash([6, 4]);
-        ctx.strokeRect(sx, sy, w, h);
-        ctx.setLineDash([]);
-      } catch (e) {
-        // getImageData can throw if region is invalid (cross-origin etc.)
-        drawFallbackTint(ctx, cx, cy, 80, '#ff00ff');
-      }
+    case 'hue_cool':
+      applyHueShift(imgData, cx, cy, r, 25);   // shift toward blue/cyan
       break;
-    }
-
-    case 'darken': {
-      ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.fillRect(cx - 50, cy - 50, 100, 100);
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([4, 4]);
-      ctx.strokeRect(cx - 50, cy - 50, 100, 100);
-      ctx.setLineDash([]);
+    case 'blur_patch':
+      applyBlur(imgData, cx, cy, r, 0.85);
       break;
-    }
-
-    case 'brighten': {
-      ctx.fillStyle = 'rgba(255,255,255,0.65)';
-      ctx.fillRect(cx - 50, cy - 50, 100, 100);
-      ctx.strokeStyle = '#000';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([4, 4]);
-      ctx.strokeRect(cx - 50, cy - 50, 100, 100);
-      ctx.setLineDash([]);
+    case 'sharpen':
+      applySharpen(imgData, cx, cy, r, 0.6);
       break;
-    }
-
-    case 'hue_shift': {
-      ctx.fillStyle = 'rgba(255,0,128,0.55)';
-      ctx.fillRect(cx - 50, cy - 50, 100, 100);
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([4, 4]);
-      ctx.strokeRect(cx - 50, cy - 50, 100, 100);
-      ctx.setLineDash([]);
-      break;
-    }
   }
 
-  ctx.restore();
+  rightCtx.putImageData(imgData, x0, y0);
 }
 
-function drawFallbackTint(ctx, cx, cy, size, color) {
-  // Used when getImageData fails (CORS): draw a visible tinted box
-  ctx.fillStyle = color;
-  ctx.fillRect(cx - size / 2, cy - size / 2, size, size);
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 3;
-  ctx.strokeRect(cx - size / 2, cy - size / 2, size, size);
-}
-
-// ── Photo rendering with safe fallback ──
-function drawPhoto(ctx, img, ox, oy) {
-  if (img && img.complete && img.naturalWidth > 0) {
-    // object-fit: cover behavior — crop to fill, no stretch
-    const srcAspect = img.naturalWidth / img.naturalHeight;
-    const dstAspect = SCENE_W / SCENE_H;
-    let sx = 0, sy = 0, sw = img.naturalWidth, sh = img.naturalHeight;
-    if (srcAspect > dstAspect) {
-      // Source is wider — crop horizontally
-      sw = img.naturalHeight * dstAspect;
-      sx = (img.naturalWidth - sw) / 2;
-    } else {
-      // Source is taller — crop vertically
-      sh = img.naturalWidth / dstAspect;
-      sy = (img.naturalHeight - sh) / 2;
-    }
-    ctx.drawImage(img, sx, sy, sw, sh, ox, oy, SCENE_W, SCENE_H);
-  } else {
-    // Fallback: gradient placeholder
-    const grad = ctx.createLinearGradient(ox, oy, ox, oy + SCENE_H);
+// ── Photo drawing (object-fit: cover — crop to fill, no stretch) ──
+function drawPhotoCover(ctx, img, dstW, dstH) {
+  if (!img || !img.complete || img.naturalWidth === 0) {
+    // Fallback gradient
+    const grad = ctx.createLinearGradient(0, 0, 0, dstH);
     grad.addColorStop(0, '#1a1a3a');
     grad.addColorStop(1, '#2a2a50');
     ctx.fillStyle = grad;
-    ctx.fillRect(ox, oy, SCENE_W, SCENE_H);
-    ctx.fillStyle = '#555577';
-    ctx.font = '24px "Courier New", monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('Loading…', ox + SCENE_W / 2, oy + SCENE_H / 2);
+    ctx.fillRect(0, 0, dstW, dstH);
+    return;
   }
+  const srcAspect = img.naturalWidth / img.naturalHeight;
+  const dstAspect = dstW / dstH;
+  let sx = 0, sy = 0, sw = img.naturalWidth, sh = img.naturalHeight;
+  if (srcAspect > dstAspect) {
+    sw = img.naturalHeight * dstAspect;
+    sx = (img.naturalWidth - sw) / 2;
+  } else {
+    sh = img.naturalWidth / dstAspect;
+    sy = (img.naturalHeight - sh) / 2;
+  }
+  ctx.drawImage(img, sx, sy, sw, sh, 0, 0, dstW, dstH);
 }
 
 // ── Game module ──
-
 const spotTheDifference = {
-  name: 'Spot the Difference',
-  description: 'Find 5 changes between two real photos. 60 seconds. Go!',
+  name: 'Photo Hunt',
+  description: 'Spot 5 subtle differences between two photos. 60 seconds. Find them!',
 
   async init() {
-    photoImg        = null;
-    photoUrl        = '';
-    differences     = [];
-    foundParticles  = [];
-    wrongFlash      = 0;
-    warningFlash    = 0;
-    splashTimer     = 2.0;
-    lastTickSecond  = -1;
-    loadError       = null;
+    leftImg = null;
+    rightImg = null;
+    differences = [];
+    foundParticles = [];
+    wrongFlash = 0;
+    warningFlash = 0;
+    splashTimer = 2.0;
+    lastTickSecond = -1;
+    loadError = null;
 
     setGameData({
       score: 0,
@@ -332,15 +391,12 @@ const spotTheDifference = {
       loading: true,
     });
 
-    // Kick off photo load (does not block splash)
+    // Kick off async round generation (doesn't block splash)
     generateRound().then(ok => {
       const data = getGameData();
       data.loading = false;
-      if (ok) {
-        data.total = differences.length;
-      } else {
-        data.total = 0;
-      }
+      if (ok) data.total = differences.length;
+      else data.total = 0;
       setGameData(data);
     });
   },
@@ -349,16 +405,9 @@ const spotTheDifference = {
     const data = getGameData();
     if (data.gameOver) return;
 
-    // Splash countdown
-    if (splashTimer > 0) {
-      splashTimer -= dt;
-      return;
-    }
-
-    // Wait for photo to load — timer paused
+    if (splashTimer > 0) { splashTimer -= dt; return; }
     if (data.loading) return;
 
-    // No diffs loaded (load failure) — bail to results
     if (differences.length === 0) {
       data.gameOver = true;
       data.won = false;
@@ -377,7 +426,6 @@ const spotTheDifference = {
     if (warningFlash > 0) warningFlash -= dt;
     if (wrongFlash > 0) wrongFlash -= dt;
 
-    // Particle lifecycle
     for (let i = foundParticles.length - 1; i >= 0; i--) {
       const p = foundParticles[i];
       p.life -= dt;
@@ -398,56 +446,44 @@ const spotTheDifference = {
   draw(ctx) {
     const data = getGameData();
 
-    // Background
+    // Dark background
     ctx.fillStyle = '#0a0a0f';
     ctx.fillRect(0, 0, 1080, 1920);
 
-    // Splash screen
-    if (splashTimer > 0) {
-      drawSplash(ctx);
-      return;
+    if (splashTimer > 0) { drawSplash(ctx); return; }
+    if (data.loading || !leftImg || !rightImg) { drawLoading(ctx, data); return; }
+
+    // Photo borders
+    drawPhotoFrame(ctx, SCENE_X_LEFT, SCENE_Y, SCENE_W, SCENE_H);
+    drawPhotoFrame(ctx, SCENE_X_RIGHT, SCENE_Y, SCENE_W, SCENE_H);
+
+    // LEFT photo — clean reference
+    ctx.save();
+    roundRectPath(ctx, SCENE_X_LEFT, SCENE_Y, SCENE_W, SCENE_H, 12);
+    ctx.clip();
+    drawPhotoCover(ctx, leftImg, SCENE_W, SCENE_H);
+    ctx.restore();
+
+    // RIGHT photo — modified copy from off-screen canvas
+    ctx.save();
+    roundRectPath(ctx, SCENE_X_RIGHT, SCENE_Y, SCENE_W, SCENE_H, 12);
+    ctx.clip();
+    if (rightCanvas) {
+      ctx.drawImage(rightCanvas, SCENE_X_RIGHT, SCENE_Y);
+    } else {
+      drawPhotoCover(ctx, rightImg, SCENE_W, SCENE_H);
     }
+    ctx.restore();
 
-    // Loading photo (after splash, before photo ready)
-    if (data.loading || !photoImg) {
-      drawLoading(ctx, data);
-      return;
-    }
-
-    // ── Draw both sides ──
-    // Left: clean photo
-    drawPhoto(ctx, photoImg, SCENE_X_LEFT, SCENE_Y);
-    // Right: photo + modifications
-    drawPhoto(ctx, photoImg, SCENE_X_RIGHT, SCENE_Y);
-    for (const mod of differences) {
-      drawMod(ctx, mod, SCENE_X_RIGHT, SCENE_Y);
-    }
-
-    // Divider
-    ctx.strokeStyle = PALETTE.dim;
-    ctx.lineWidth = 1;
-    ctx.setLineDash([8, 8]);
-    ctx.beginPath();
-    ctx.moveTo(540, SCENE_Y - 10);
-    ctx.lineTo(540, SCENE_Y + SCENE_H + 10);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Side labels
+    // Side labels (above photos)
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
     ctx.fillStyle = PALETTE.dim;
-    ctx.textAlign = 'center';
-    ctx.font = '22px "Courier New", monospace';
-    ctx.fillText('REFERENCE', SCENE_X_LEFT + SCENE_W / 2, SCENE_Y - 14);
-    ctx.fillText('FIND CHANGES', SCENE_X_RIGHT + SCENE_W / 2, SCENE_Y - 14);
+    ctx.font = 'bold 24px "Courier New", monospace';
+    ctx.fillText('REFERENCE', SCENE_X_LEFT + SCENE_W / 2, SCENE_Y - 18);
+    ctx.fillText('FIND CHANGES', SCENE_X_RIGHT + SCENE_W / 2, SCENE_Y - 18);
 
-    // Photo credits (required by Picsum terms)
-    ctx.fillStyle = '#444466';
-    ctx.font = '14px "Courier New", monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('Photos: Picsum / Unsplash (CC0)', 540, SCENE_Y + SCENE_H + 26);
-    ctx.fillText(`Category: ${categoryId}`, 540, SCENE_Y + SCENE_H + 46);
-
-    // Found-difference highlights (green circle + checkmark on both sides)
+    // Found-difference highlights (green circle + check on both sides)
     for (const mod of differences) {
       if (!mod.found) continue;
       drawFoundHighlight(ctx, mod, SCENE_X_LEFT, SCENE_Y);
@@ -471,7 +507,7 @@ const spotTheDifference = {
       ctx.fillRect(0, 0, 1080, 1920);
     }
 
-    // Low-time border warning
+    // Low-time warning
     if (data.timeRemaining <= 10 && warningFlash > 0) {
       const a = Math.sin(Date.now() / 150) * 0.12 + 0.12;
       ctx.fillStyle = `rgba(255, 51, 85, ${a})`;
@@ -482,9 +518,8 @@ const spotTheDifference = {
   handlePointer(x, y) {
     const data = getGameData();
     if (data.gameOver || splashTimer > 0 || data.loading) return;
-    if (!photoImg || differences.length === 0) return;
+    if (differences.length === 0) return;
 
-    // Tap must be inside one of the photo areas
     const inLeft  = x >= SCENE_X_LEFT  && x <= SCENE_X_LEFT  + SCENE_W &&
                     y >= SCENE_Y       && y <= SCENE_Y       + SCENE_H;
     const inRight = x >= SCENE_X_RIGHT && x <= SCENE_X_RIGHT + SCENE_W &&
@@ -495,7 +530,6 @@ const spotTheDifference = {
     const relX = x - sceneX;
     const relY = y - SCENE_Y;
 
-    // Check hits
     let hitIndex = -1;
     for (let i = 0; i < differences.length; i++) {
       const mod = differences[i];
@@ -552,8 +586,10 @@ const spotTheDifference = {
   },
 
   cleanup() {
-    photoImg = null;
-    photoUrl = '';
+    leftImg = null;
+    rightImg = null;
+    rightCanvas = null;
+    rightCtx = null;
     differences = [];
     foundParticles = [];
     wrongFlash = 0;
@@ -572,21 +608,22 @@ function drawSplash(ctx) {
   ctx.shadowColor = PALETTE.neonCyan;
   ctx.shadowBlur = 60;
   ctx.fillStyle = PALETTE.neonCyan;
-  ctx.font = 'bold 72px "Courier New", monospace';
-  ctx.fillText('PHOTO', 540, 600);
+  ctx.font = 'bold 84px "Courier New", monospace';
+  ctx.fillText('PHOTO', 540, 580);
   ctx.shadowColor = PALETTE.neonPink;
   ctx.shadowBlur = 60;
   ctx.fillStyle = PALETTE.neonPink;
-  ctx.fillText('HUNT', 540, 720);
+  ctx.fillText('HUNT', 540, 700);
   ctx.shadowBlur = 0;
 
   ctx.fillStyle = PALETTE.white;
   ctx.font = '36px "Courier New", monospace';
-  ctx.fillText(`Find ${TOTAL_DIFFERENCES} changes in ${TIME_LIMIT} seconds`, 540, 870);
+  ctx.fillText(`Find ${TOTAL_DIFFERENCES} subtle differences`, 540, 850);
+  ctx.fillText(`in ${TIME_LIMIT} seconds`, 540, 900);
 
   ctx.fillStyle = PALETTE.dim;
   ctx.font = '28px "Courier New", monospace';
-  ctx.fillText('Wrong taps cost 5 seconds!', 540, 940);
+  ctx.fillText('Wrong taps cost 5 seconds', 540, 970);
 
   const count = Math.ceil(splashTimer);
   ctx.fillStyle = PALETTE.neonAmber;
@@ -595,11 +632,10 @@ function drawSplash(ctx) {
 
   ctx.fillStyle = PALETTE.dim;
   ctx.font = '22px "Courier New", monospace';
-  ctx.fillText('Loading photo…', 540, 1500);
+  ctx.fillText('Loading photos…', 540, 1500);
 }
 
 function drawLoading(ctx, data) {
-  // Semi-transparent dark overlay so user sees what's behind
   ctx.fillStyle = 'rgba(10,10,15,0.85)';
   ctx.fillRect(0, 0, 1080, 1920);
 
@@ -607,14 +643,13 @@ function drawLoading(ctx, data) {
   ctx.textBaseline = 'middle';
   ctx.fillStyle = PALETTE.white;
   ctx.font = 'bold 48px "Courier New", monospace';
-  ctx.fillText('LOADING PHOTO…', 540, 900);
+  ctx.fillText('LOADING PHOTOS…', 540, 900);
 
   if (loadError) {
     ctx.fillStyle = PALETTE.red;
     ctx.font = '24px "Courier New", monospace';
-    ctx.fillText('Photo failed to load — ending round', 540, 980);
+    ctx.fillText('Photos failed to load — ending round', 540, 980);
   } else {
-    // Spinner
     const t = Date.now() / 200;
     ctx.strokeStyle = PALETTE.neonCyan;
     ctx.lineWidth = 6;
@@ -622,6 +657,31 @@ function drawLoading(ctx, data) {
     ctx.arc(540, 1100, 60, t, t + Math.PI * 1.4);
     ctx.stroke();
   }
+}
+
+function drawPhotoFrame(ctx, x, y, w, h) {
+  ctx.save();
+  ctx.shadowColor = PALETTE.neonCyan;
+  ctx.shadowBlur = 18;
+  ctx.strokeStyle = 'rgba(0, 240, 255, 0.4)';
+  ctx.lineWidth = 2;
+  roundRectPath(ctx, x, y, w, h, 12);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function roundRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
 }
 
 function drawFoundHighlight(ctx, mod, ox, oy) {
@@ -632,21 +692,35 @@ function drawFoundHighlight(ctx, mod, ox, oy) {
   ctx.shadowColor = PALETTE.neonGreen;
   ctx.shadowBlur = 18;
   ctx.beginPath();
-  ctx.arc(cx, cy, 28, 0, Math.PI * 2);
+  ctx.arc(cx, cy, 30, 0, Math.PI * 2);
   ctx.stroke();
   ctx.shadowBlur = 0;
 
-  // Checkmark
   ctx.lineWidth = 5;
   ctx.lineCap = 'round';
   ctx.beginPath();
-  ctx.moveTo(cx - 12, cy);
-  ctx.lineTo(cx - 3, cy + 9);
-  ctx.lineTo(cx + 14, cy - 10);
+  ctx.moveTo(cx - 14, cy);
+  ctx.lineTo(cx - 4, cy + 10);
+  ctx.lineTo(cx + 16, cy - 12);
   ctx.stroke();
 }
 
 // Register with engine
 registerGame(spotTheDifference);
+
+// ── Debug hook for testing ──
+// Exposes the current round's difference positions so CDP tests can
+// tap them deterministically. Harmless in production (read-only).
+window.__photoHuntDebug = () => {
+  if (!differences.length) return null;
+  return differences.map(m => ({
+    type: m.type,
+    hint: m.hint,
+    x: Math.round(m.x + SCENE_X_RIGHT),
+    y: Math.round(m.y + SCENE_Y),
+    hitR: m.hitR,
+    found: m.found,
+  }));
+};
 
 export default spotTheDifference;

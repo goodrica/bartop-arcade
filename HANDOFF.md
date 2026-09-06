@@ -10,6 +10,62 @@ clicks** and **touch events** work.
 
 ---
 
+## Photo Hunt Rebuild (v2 — 2026-09-06)
+
+The procedural stick-figure scenes were replaced with **real stock photos** and the
+game was renamed "Photo Hunt" to match Megatouch's actual name.
+
+### Architecture
+
+- **Two genuinely different photos** are loaded from the same category (40/40
+  sampled pixels differ between left and right sides).
+- The **right photo** is copied to an off-screen canvas, then 5 subtle
+  modifications are applied to pixel data — no overlaid shapes.
+- All modifications use a smooth circular mask so patches blend naturally
+  (no sharp borders).
+
+### Modification Types (all subtle, photo-realistic)
+
+| Type | Effect |
+|------|--------|
+| `brighten` | Lighter patch (RGB +255·falloff) |
+| `darken` | Darker patch (RGB −255·falloff) |
+| `saturate` | Multiply saturation by 1.7 |
+| `desaturate` | Multiply saturation by 0.3 |
+| `hue_warm` | Shift hue −15° (toward red/orange) |
+| `hue_cool` | Shift hue +25° (toward blue/cyan) |
+| `blur_patch` | 5×5 box-blur with mask blend |
+| `sharpen` | Local contrast boost |
+
+### Critical Bug Found and Fixed During Verification
+
+The diff objects were created with property `r` (visual patch radius) but
+`handlePointer()` and the debug hook read `hitR` (touch hit zone). Result:
+every tap compared against `undefined`, which fails the distance check.
+**Every previous "test passed" output was wrong** — the photos loaded
+correctly but no tap could ever land.
+
+**Fix:** Added `hitR: PHOTO_HIT_RADIUS` to each diff object in `generateRound()`.
+Verified: tap on diff 0 → found 0→1, score 0→100, diff marked `found: true`.
+
+### Files Touched
+
+- `js/photo-loader.js` — NEW: local-photo loader with caching, 10 categories
+- `assets/photos/*.jpg` — NEW: 96 stock photos (CC0 via Picsum/Unsplash), ~5.6MB
+- `scripts/download-photos.sh` — NEW: bash script to refresh photo set
+- `js/games/spot-the-difference.js` — FULL REWRITE: two photos + subtle mods
+- `HANDOFF.md`, `README.md` — Updated to reflect Photo Hunt design
+
+### Test Evidence (CDP-driven, headless Chrome 148)
+
+- 5/5 modifications found via debug-hook taps → score 612 → game won
+- Mouse clicks and touch events both register
+- Zero JS exceptions across full session
+- Photos render as real images (40/40 unique pixels per 40-sample set)
+- Screenshots: `/tmp/hunt_menu.png`, `/tmp/hunt_gameplay.png`, `/tmp/hunt_results.png`
+
+---
+
 ## Root Cause (actual, confirmed in browser)
 
 All the earlier module-loading theories (circular imports, TDZ on `menuGames`,
