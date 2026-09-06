@@ -37,11 +37,11 @@ let splashTimer = 0;        // Start splash delay
 let lastTickSecond = -1;    // For metronome tick
 
 // ── Scene Generators ──
-const sceneGenerators = [
-  generateCityScene,
-  generateUnderwaterScene,
-  generateSpaceScene,
-];
+// NOTE: resolved lazily inside generateRound() because class declarations
+// (CityScene etc.) are in the temporal dead zone at this point in the module.
+function getSceneGenerators() {
+  return [CityScene, UnderwaterScene, SpaceScene];
+}
 
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -712,43 +712,16 @@ class SpaceScene {
 
 // ── Generate a pair of scenes with differences ──
 function generateRound() {
-  const Generator = pickRandom(sceneGenerators);
+  const Generator = pickRandom(getSceneGenerators());
   const baseScene = new Generator();
-  const diffScene = new Generator();
 
-  // Copy base properties to diff scene — then apply mutations
-  // Actually easier: use the same generator type but we need to track the diffs
-  // Let's use a simpler approach: clone by creating two instances and applying mutations to the second
-
-  // But we applied random in constructor, so they differ already.
-  // We need to make a copy of the scene state and apply differences to the copy.
-  // Actually the cleanest way is to serialize/deserialize the scene.
-
-  // Simpler approach: Create base, then create diff as a deep clone, then apply differences to diff
-  const baseJSON = JSON.stringify(baseScene, (key, val) => {
-    if (key === 'differences' || key === 'mutatePointer') return undefined;
-    return val;
-  });
-  const diffData = JSON.parse(baseJSON);
-
-  // Rebuild diff scene from parsed data
-  // We need to reconstruct the class instance. Let's just use a plain object pattern instead.
-  // Actually this is getting complex. Let me simplify: both scenes start identical from the same instance,
-  // then we apply mutations to the "right" scene only.
-
-  // New approach: generate one scene, deep-copy it, then apply mutations to copy.
-  // But our constructors use random. Let's make a generate function that creates a pair.
-
-  // Simplest: Create ONE scene, serialize its data, deserialize for right, then mutate right.
+  // Deep-clone the base scene's data for the right-hand copy.
+  // The clone is a plain object (no methods), so it's rendered via
+  // drawSceneGeneric()'s plain-object draw paths.
   const cloneData = JSON.parse(JSON.stringify(baseScene, (k, v) => {
     if (k === 'differences' || k === 'mutatePointer') return undefined;
     return v;
   }));
-
-  // Reconstruct objects (they're plain objects now, not class instances)
-  // But draw() works on plain objects with the same properties, so that's fine.
-  // We just need the mutateDifference function to work on plain objects too.
-  // Let me just define mutateDifference as a standalone function.
 
   return { left: baseScene, right: cloneData };
 }
@@ -1290,6 +1263,7 @@ const spotTheDifference = {
       data.gameOver = true;
       data.won = false;
       AudioManager.playGameOver();
+      pushScreen('results');
     }
   },
 
@@ -1484,6 +1458,7 @@ const spotTheDifference = {
         const timeBonus = Math.floor(data.timeRemaining * SCORE_BONUS_MULT);
         data.score += timeBonus;
         AudioManager.playVictory();
+        pushScreen('results');
       }
     } else {
       // Wrong tap — penalty
@@ -1497,6 +1472,7 @@ const spotTheDifference = {
         data.gameOver = true;
         data.won = false;
         AudioManager.playGameOver();
+        pushScreen('results');
       }
     }
 

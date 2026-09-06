@@ -143,9 +143,8 @@ function handleMenuTap(x, y) {
 function handleResultsTap(x, y) {
   // "Play Again" button
   if (x >= 340 && x <= 740 && y >= 1400 && y <= 1520) {
-    screenStack.pop();
-    if (currentGame) launchGame(currentGame.constructor?.module || currentGame);
-    else pushScreen('menu');
+    if (currentGame) launchGame(currentGame);
+    else screenStack = ['menu'];
     return;
   }
   // "Menu" button
@@ -486,3 +485,18 @@ export function start() {
 document.addEventListener('DOMContentLoaded', () => {
   start();
 });
+
+// Module scripts are deferred, so DOMContentLoaded may have ALREADY fired
+// by the time this module evaluates (e.g. cached loads). Cover that case.
+if (document.readyState !== 'loading') {
+  start();
+}
+
+// ── Debug hook (used by automated tests; harmless in production) ──
+window.__bartopDebug = {
+  get screen() { return screenStack[screenStack.length - 1]; },
+  get screenStack() { return [...screenStack]; },
+  get games() { return menuGames.map(g => g.name); },
+  get gameData() { return { ...gameData }; },
+  get running() { return running; },
+};
