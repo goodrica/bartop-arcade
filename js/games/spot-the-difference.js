@@ -237,33 +237,34 @@ function applySharpen(data, cx, cy, radius, strength) {
 }
 
 // ── Photo loading + modification ──
+// The real Megatouch Photo Hunt model: load ONE photo, draw it identically
+// on both sides, then apply 5 very subtle, SMALL pixel-level modifications
+// to the right copy. The changes should look like natural photo details
+// — one petal slightly different, one small spot of shade, etc.
 async function generateRound() {
-  // Pick a category
   categoryId = randomCategoryId();
 
-  // Load two photos from the same category
-  const imgs = await loadPhotosByCategory(categoryId, 2);
-  if (!imgs[0] || !imgs[1]) {
-    loadError = new Error(`Failed to load photos from category: ${categoryId}`);
+  // Load ONE photo (used on both sides — they're identical except for mods)
+  const imgs = await loadPhotosByCategory(categoryId, 1);
+  if (!imgs[0]) {
+    loadError = new Error(`Failed to load photo from category: ${categoryId}`);
     return false;
   }
 
   leftImg = imgs[0];
-  rightImg = imgs[1];
+  rightImg = imgs[0];   // SAME photo — modifications applied via off-screen canvas
   loadError = null;
 
-  // Create off-screen canvas for the modified right photo
+  // Off-screen canvas for the modified right photo
   if (!rightCanvas) {
     rightCanvas = document.createElement('canvas');
   }
   rightCanvas.width = SCENE_W;
   rightCanvas.height = SCENE_H;
   rightCtx = rightCanvas.getContext('2d', { willReadFrequently: true });
-
-  // Draw the right photo onto the off-screen canvas
   drawPhotoCover(rightCtx, rightImg, SCENE_W, SCENE_H);
 
-  // Generate differences — pick 5 unique types
+  // Pick 5 unique modification types
   const pool = [...MOD_TYPES];
   for (let i = pool.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -271,17 +272,18 @@ async function generateRound() {
   }
   const chosen = pool.slice(0, TOTAL_DIFFERENCES);
 
-  // Place each modification at a random point on the photo
+  // Place each modification at a SMALL random point on the photo
+  // (small radius = subtle change, like a single petal or leaf)
   differences = chosen.map((mod, i) => {
-    const margin = 70;
+    const margin = 60;
     return {
       key: `${mod.type}-${i}-${Date.now()}`,
       type: mod.type,
       hint: mod.hint,
       x: rand(margin, SCENE_W - margin),
       y: rand(margin, SCENE_H - margin),
-      r: rand(45, 65),      // patch radius (visual)
-      hitR: PHOTO_HIT_RADIUS, // touch hit-zone radius (larger for fingers)
+      r: rand(12, 28),          // SMALL patches (was 45-65)
+      hitR: PHOTO_HIT_RADIUS,   // touch hit zone stays generous for fingers
       found: false,
     };
   });
@@ -295,6 +297,10 @@ async function generateRound() {
 }
 
 // Apply a single modification to the right canvas
+// Strengths are deliberately SUBTLE — the differences should look like
+// natural photo details (a petal slightly different, one leaf darker)
+// not obvious color shifts. Megatouch Photo Hunt's whole challenge is
+// that the changes are tiny.
 function applyModification(mod) {
   const r = Math.ceil(mod.r);
   const x0 = Math.max(0, Math.floor(mod.x - r));
@@ -305,34 +311,33 @@ function applyModification(mod) {
   if (w <= 0 || h <= 0) return;
 
   const imgData = rightCtx.getImageData(x0, y0, w, h);
-  // Position relative to imageData
   const cx = mod.x - x0;
   const cy = mod.y - y0;
 
   switch (mod.type) {
     case 'brighten':
-      applyBrighten(imgData, cx, cy, r, 0.45);
+      applyBrighten(imgData, cx, cy, r, 0.15);    // subtle, like sunlight hit
       break;
     case 'darken':
-      applyDarken(imgData, cx, cy, r, 0.45);
+      applyDarken(imgData, cx, cy, r, 0.15);      // subtle, like a shadow
       break;
     case 'saturate':
-      applySaturation(imgData, cx, cy, r, 1.7);
+      applySaturation(imgData, cx, cy, r, 1.25);  // slightly more vibrant
       break;
     case 'desaturate':
-      applySaturation(imgData, cx, cy, r, 0.3);
+      applySaturation(imgData, cx, cy, r, 0.6);   // slightly less vibrant
       break;
     case 'hue_warm':
-      applyHueShift(imgData, cx, cy, r, -15);  // shift toward red/orange
+      applyHueShift(imgData, cx, cy, r, -8);      // like red→pink
       break;
     case 'hue_cool':
-      applyHueShift(imgData, cx, cy, r, 25);   // shift toward blue/cyan
+      applyHueShift(imgData, cx, cy, r, 8);       // like blue→cyan
       break;
     case 'blur_patch':
-      applyBlur(imgData, cx, cy, r, 0.85);
+      applyBlur(imgData, cx, cy, r, 0.4);         // mild softening
       break;
     case 'sharpen':
-      applySharpen(imgData, cx, cy, r, 0.6);
+      applySharpen(imgData, cx, cy, r, 0.25);     // mild edge boost
       break;
   }
 
