@@ -6,6 +6,7 @@
    ============================================ */
 
 import { AudioManager } from './audio.js';
+import './games/spot-the-difference.js';
 
 // ── Colour Palette (retro neon on dark) ──
 export const PALETTE = {
@@ -72,7 +73,6 @@ function normalizePointer(clientX, clientY) {
 }
 
 function onPointerDown(e) {
-  e.preventDefault();
   const p = normalizePointer(e.clientX, e.clientY);
   pointerActive = true;
   pointerX = p.x;
@@ -81,19 +81,30 @@ function onPointerDown(e) {
 }
 
 function onPointerMove(e) {
-  e.preventDefault();
   const p = normalizePointer(e.clientX, e.clientY);
   pointerX = p.x;
   pointerY = p.y;
 }
 
 function onPointerUp(e) {
-  e.preventDefault();
   pointerActive = false;
 }
 
+function onClick(e) {
+  // Fallback for environments where pointerdown doesn't fire reliably
+  const p = normalizePointer(e.clientX, e.clientY);
+  handleTap(p.x, p.y);
+}
+
+let lastTapTime = 0;
+
 // ── Tap Dispatcher ──
 function handleTap(x, y) {
+  // Debounce: ignore rapid duplicate taps (pointerdown + click on same press)
+  const now = Date.now();
+  if (now - lastTapTime < 100) return;
+  lastTapTime = now;
+
   AudioManager.ensureInit();
 
   const top = screenStack[screenStack.length - 1];
@@ -454,6 +465,9 @@ export function start() {
   canvas.addEventListener('pointerup', onPointerUp);
   canvas.addEventListener('pointerleave', onPointerUp);
   canvas.addEventListener('pointercancel', onPointerUp);
+
+  // Click fallback — some environments need this
+  canvas.addEventListener('click', onClick);
 
   // Prevent context menu
   canvas.addEventListener('contextmenu', e => e.preventDefault());
