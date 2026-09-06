@@ -262,7 +262,7 @@ async function generateRound() {
   rightCanvas.width = SCENE_W;
   rightCanvas.height = SCENE_H;
   rightCtx = rightCanvas.getContext('2d', { willReadFrequently: true });
-  drawPhotoCover(rightCtx, rightImg, SCENE_W, SCENE_H);
+  drawPhotoCover(rightCtx, rightImg, 0, 0, SCENE_W, SCENE_H);
 
   // Pick 5 unique modification types
   const pool = [...MOD_TYPES];
@@ -345,14 +345,15 @@ function applyModification(mod) {
 }
 
 // ── Photo drawing (object-fit: cover — crop to fill, no stretch) ──
-function drawPhotoCover(ctx, img, dstW, dstH) {
+// Draws to (dstX, dstY) so the photo aligns with its clip-path pane.
+// The off-screen right canvas uses (0, 0); the left pane uses (40, 160).
+function drawPhotoCover(ctx, img, dstX, dstY, dstW, dstH) {
   if (!img || !img.complete || img.naturalWidth === 0) {
-    // Fallback gradient
-    const grad = ctx.createLinearGradient(0, 0, 0, dstH);
+    const grad = ctx.createLinearGradient(dstX, dstY, dstX, dstY + dstH);
     grad.addColorStop(0, '#1a1a3a');
     grad.addColorStop(1, '#2a2a50');
     ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, dstW, dstH);
+    ctx.fillRect(dstX, dstY, dstW, dstH);
     return;
   }
   const srcAspect = img.naturalWidth / img.naturalHeight;
@@ -365,7 +366,7 @@ function drawPhotoCover(ctx, img, dstW, dstH) {
     sh = img.naturalWidth / dstAspect;
     sy = (img.naturalHeight - sh) / 2;
   }
-  ctx.drawImage(img, sx, sy, sw, sh, 0, 0, dstW, dstH);
+  ctx.drawImage(img, sx, sy, sw, sh, dstX, dstY, dstW, dstH);
 }
 
 // ── Game module ──
@@ -462,11 +463,11 @@ const spotTheDifference = {
     drawPhotoFrame(ctx, SCENE_X_LEFT, SCENE_Y, SCENE_W, SCENE_H);
     drawPhotoFrame(ctx, SCENE_X_RIGHT, SCENE_Y, SCENE_W, SCENE_H);
 
-    // LEFT photo — clean reference
+    // LEFT photo — clean reference, drawn to its pane origin
     ctx.save();
     roundRectPath(ctx, SCENE_X_LEFT, SCENE_Y, SCENE_W, SCENE_H, 12);
     ctx.clip();
-    drawPhotoCover(ctx, leftImg, SCENE_W, SCENE_H);
+    drawPhotoCover(ctx, leftImg, SCENE_X_LEFT, SCENE_Y, SCENE_W, SCENE_H);
     ctx.restore();
 
     // RIGHT photo — modified copy from off-screen canvas
@@ -476,7 +477,7 @@ const spotTheDifference = {
     if (rightCanvas) {
       ctx.drawImage(rightCanvas, SCENE_X_RIGHT, SCENE_Y);
     } else {
-      drawPhotoCover(ctx, rightImg, SCENE_W, SCENE_H);
+      drawPhotoCover(ctx, rightImg, SCENE_X_RIGHT, SCENE_Y, SCENE_W, SCENE_H);
     }
     ctx.restore();
 
