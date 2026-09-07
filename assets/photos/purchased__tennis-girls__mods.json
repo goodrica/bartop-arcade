@@ -1,7 +1,37 @@
 [
-  {"type": "object_removed", "hint": "Something is missing", "x": 125, "y": 259, "hitR": 50},
-  {"type": "object_added", "hint": "Something appeared", "x": 815, "y": 777, "hitR": 64},
-  {"type": "object_removed", "hint": "Something erased", "x": 545, "y": 198, "hitR": 40},
-  {"type": "color_changed", "hint": "Color changed", "x": 227, "y": 129, "hitR": 49},
-  {"type": "object_changed", "hint": "Texture mismatch", "x": 827, "y": 450, "hitR": 45}
+  {
+    "type": "object_removed",
+    "hint": "Something is missing",
+    "x": 1234,
+    "y": 693,
+    "hitR": 32
+  },
+  {
+    "type": "color_changed",
+    "hint": "Object color changed",
+    "x": 236,
+    "y": 293,
+    "hitR": 32
+  },
+  {
+    "type": "object_removed",
+    "hint": "Background element removed",
+    "x": 1051,
+    "y": 508,
+    "hitR": 30
+  },
+  {
+    "type": "brightness_changed",
+    "hint": "Area brighter/darker",
+    "x": 1201,
+    "y": 754,
+    "hitR": 38
+  },
+  {
+    "type": "contrast_changed",
+    "hint": "Area contrast changed",
+    "x": 681,
+    "y": 718,
+    "hitR": 30
+  }
 ]
