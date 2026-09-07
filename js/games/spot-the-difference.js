@@ -57,18 +57,20 @@ const SCORE_BONUS_MULT  = 2;
 const PHOTO_HIT_RADIUS  = 55;    // generous for touch
 
 // ── Modification registry ──
-// Each type modifies actual photo pixels in a circular region on
-// the right photo. Effects are subtle enough that they look like
-// natural differences between two photos, not added shapes.
+// Megatouch Photo Hunt-style changes — bold, findable, like real "find the
+// difference" puzzles. Each modification makes an obvious visible change to
+// the photo (a missing element, color swap, or contrast shift in a region).
+// Draws inside a circular hit zone — no subtle hue/brightness shifts that
+// blend into photo noise.
 const MOD_TYPES = [
-  { type: 'brighten',   hint: 'Brighter region' },
-  { type: 'darken',     hint: 'Darker region' },
-  { type: 'saturate',   hint: 'More saturated region' },
-  { type: 'desaturate', hint: 'Less saturated region' },
-  { type: 'hue_warm',   hint: 'Warmer color region' },
-  { type: 'hue_cool',   hint: 'Cooler color region' },
-  { type: 'blur_patch', hint: 'Blurred region' },
-  { type: 'sharpen',    hint: 'Sharper region' },
+  { type: 'object_removed',  hint: 'Object removed' },
+  { type: 'color_swap',      hint: 'Color changed' },
+  { type: 'large_darken',    hint: 'Dark area' },
+  { type: 'large_brighten',  hint: 'Bright area' },
+  { type: 'contrast_invert', hint: 'Inverted patch' },
+  { type: 'red_tint',        hint: 'Red tint' },
+  { type: 'yellow_tint',     hint: 'Yellow tint' },
+  { type: 'blue_tint',       hint: 'Blue tint' },
 ];
 
 // ── Per-round state ──
@@ -123,12 +125,13 @@ function hslToRgb(h, s, l) {
 
 // ── Photo modification operations ──
 // Each takes an ImageData region and modifies pixels.
-// All operations use a soft circular mask so the patch
-// blends into the surrounding photo (no sharp borders).
+// Megatouch Photo Hunt-style modifications — bold edges, findable.
+// (Older versions used a smooth falloff; when the off-screen canvas is
+// downscaled to fit the pane, smooth falloff becomes invisible.)
 function maskFalloff(distance, maxR) {
-  // Smooth falloff: 1 at center, 0 at edge
-  const t = Math.max(0, Math.min(1, 1 - distance / maxR));
-  return t * t * (3 - 2 * t); // smoothstep
+  // Hard-edged: 1 inside, 0 outside. No fade. Megatouch mod regions
+  // look like crisp rectangles/circles overlaid on the photo.
+  return distance <= maxR ? 1 : 0;
 }
 
 function applyBrighten(data, cx, cy, radius, strength) {
@@ -256,13 +259,112 @@ function applySharpen(data, cx, cy, radius, strength) {
   }
 }
 
+// Megatouch Photo Hunt-style modifications. Each makes a BOLD, obvious
+// change in the hit region — findable without squinting.
+
+// "Object removed" — sample 12 border pixels and paint the whole region
+// with their average color (like the object was airbrushed out).
+function applyPaintOut(data, cx, cy, radius) {
+  // Sample average of pixels on a ring at the radius boundary
+  let rSum = 0, gSum = 0, bSum = 0, n = 0;
+  const ringRadius = Math.max(radius - 2, 1);
+  const steps = 32;
+  for (let i = 0; i < steps; i++) {
+    const angle = (i / steps) * Math.PI * 2;
+    const px = Math.round(cx + Math.cos(angle) * ringRadius);
+    const py = Math.round(cy + Math.sin(angle) * ringRadius);
+    if (px < 0 || px >= data.width || py < 0 || py >= data.height) continue;
+    const i2 = (py * data.width + px) * 4;
+    rSum += data.data[i2];
+    gSum += data.data[i2 + 1];
+    bSum += data.data[i2 + 2];
+    n++;
+  }
+  const r = n > 0 ? rSum / n : 128;
+  const g = n > 0 ? gSum / n : 128;
+  const b = n > 0 ? bSum / n : 128;
+  // Paint the whole region with that average color
+  for (let py = -radius; py <= radius; py++) {
+    for (let px = -radius; px <= radius; px++) {
+      const dist = Math.sqrt(px * px + py * py);
+      if (dist > radius) continue;
+      const x = cx + px, y = cy + py;
+      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
+      const i = (y * data.width + x) * 4;
+      const m = maskFalloff(dist, radius);
+      data.data[i]     = data.data[i]     * (1 - m) + r * m;
+      data.data[i + 1] = data.data[i + 1] * (1 - m) + g * m;
+      data.data[i + 2] = data.data[i + 2] * (1 - m) + b * m;
+    }
+  }
+}
+
+// "Color swap" — replace each pixel with its complementary hue.
+function applyColorSwap(data, cx, cy, radius) {
+  for (let py = -radius; py <= radius; py++) {
+    for (let px = -radius; px <= radius; px++) {
+      const dist = Math.sqrt(px * px + py * py);
+      if (dist > radius) continue;
+      const x = cx + px, y = cy + py;
+      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
+      const i = (y * data.width + x) * 4;
+      const m = maskFalloff(dist, radius);
+      const r = data.data[i], g = data.data[i + 1], b = data.data[i + 2];
+      // Complement: 255 - rgb
+      const cr = 255 - r, cg = 255 - g, cb = 255 - b;
+      data.data[i]     = r * (1 - m) + cr * m;
+      data.data[i + 1] = g * (1 - m) + cg * m;
+      data.data[i + 2] = b * (1 - m) + cb * m;
+    }
+  }
+}
+
+// Full RGB invert within the region.
+function applyInvert(data, cx, cy, radius) {
+  for (let py = -radius; py <= radius; py++) {
+    for (let px = -radius; px <= radius; px++) {
+      const dist = Math.sqrt(px * px + py * py);
+      if (dist > radius) continue;
+      const x = cx + px, y = cy + py;
+      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
+      const i = (y * data.width + x) * 4;
+      const m = maskFalloff(dist, radius);
+      data.data[i]     = data.data[i]     * (1 - m) + (255 - data.data[i])     * m;
+      data.data[i + 1] = data.data[i + 1] * (1 - m) + (255 - data.data[i + 1]) * m;
+      data.data[i + 2] = data.data[i + 2] * (1 - m) + (255 - data.data[i + 2]) * m;
+    }
+  }
+}
+
+// Color overlay (red/yellow/blue tint). Mixes toward target color.
+function applyColorOverlay(data, cx, cy, radius, color, strength) {
+  const [tr, tg, tb] = color;
+  for (let py = -radius; py <= radius; py++) {
+    for (let px = -radius; px <= radius; px++) {
+      const dist = Math.sqrt(px * px + py * py);
+      if (dist > radius) continue;
+      const x = cx + px, y = cy + py;
+      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
+      const i = (y * data.width + x) * 4;
+      const m = maskFalloff(dist, radius) * strength;
+      data.data[i]     = data.data[i]     * (1 - m) + tr * m;
+      data.data[i + 1] = data.data[i + 1] * (1 - m) + tg * m;
+      data.data[i + 2] = data.data[i + 2] * (1 - m) + tb * m;
+    }
+  }
+}
+
 // ── Photo loading + modification ──
 // The real Megatouch Photo Hunt model: load ONE photo, draw it identically
 // on both sides, then apply 5 very subtle, SMALL pixel-level modifications
 // to the right copy. The changes should look like natural photo details
 // — one petal slightly different, one small spot of shade, etc.
 async function generateRound() {
-  categoryId = randomCategoryId();
+  // Pin to the user's purchased photo category so they can preview their
+  // own photos with the new Megatouch-style mods. (Random category picking
+  // is still available via the regular game flow once they confirm the
+  // look-and-feel.)
+  categoryId = 'purchased';
 
   // Load ONE photo (used on both sides — they're identical except for mods)
   const imgs = await loadPhotosByCategory(categoryId, 1);
@@ -307,8 +409,10 @@ async function generateRound() {
       x: rand(margin, SCENE_W - margin),
       y: rand(margin, SCENE_H - margin),
       // Visual radius scaled to display; will be scaled up for source canvas.
-      // Higher difficulty multiplier = bigger patch (easier to see).
-      r: rand(10, 22) * diff,
+      // Megatouch Photo Hunt patches are findable (button-sized, not pixel-sized).
+      // At level 1 (diff=1.5): r ≈ 38-65 display-px (large enough to spot at a glance)
+      // At level 4+ (diff=1.0): r ≈ 25-43 display-px
+      r: rand(25, 43) * diff,
       // Hit zone: generous even at base level, scaled up for early levels.
       hitR: Math.round(PHOTO_HIT_RADIUS * diff),
       // Stashed multiplier for applyModification to scale strength.
@@ -356,30 +460,38 @@ function applyModification(mod) {
   // Difficulty multiplier scales modification strength (lower level = stronger).
   const diff = mod.diffMult || 1.0;
 
+  // Effective radius: bigger at easier levels, but always findable.
+  // At level 1 (diff=1.5): r = 35 src-px → ~24 display-px
+  // At level 4+ (diff=1.0): r = 25 src-px → ~17 display-px
+  const effR = Math.max(r, Math.ceil(srcR * diff));
+
   switch (mod.type) {
-    case 'brighten':
-      applyBrighten(imgData, cx, cy, r, 0.15 * diff);
+    case 'object_removed':
+      // Replace the region with the average color of its border (paint-out effect)
+      applyPaintOut(imgData, cx, cy, effR);
       break;
-    case 'darken':
-      applyDarken(imgData, cx, cy, r, 0.15 * diff);
+    case 'color_swap':
+      // Swap the dominant hue to its complement (e.g. red→cyan, blue→orange)
+      applyColorSwap(imgData, cx, cy, effR);
       break;
-    case 'saturate':
-      applySaturation(imgData, cx, cy, r, 1 + (1.25 - 1) * diff);
+    case 'large_darken':
+      applyDarken(imgData, cx, cy, effR, 0.7);
       break;
-    case 'desaturate':
-      applySaturation(imgData, cx, cy, r, 1 - (1 - 0.6) * diff);
+    case 'large_brighten':
+      applyBrighten(imgData, cx, cy, effR, 0.7);
       break;
-    case 'hue_warm':
-      applyHueShift(imgData, cx, cy, r, -8 * diff);
+    case 'contrast_invert':
+      // Full RGB inversion in the region
+      applyInvert(imgData, cx, cy, effR);
       break;
-    case 'hue_cool':
-      applyHueShift(imgData, cx, cy, r, 8 * diff);
+    case 'red_tint':
+      applyColorOverlay(imgData, cx, cy, effR, [255, 60, 60], 0.55);
       break;
-    case 'blur_patch':
-      applyBlur(imgData, cx, cy, r, 0.4 * diff);
+    case 'yellow_tint':
+      applyColorOverlay(imgData, cx, cy, effR, [255, 220, 60], 0.55);
       break;
-    case 'sharpen':
-      applySharpen(imgData, cx, cy, r, 0.25 * diff);
+    case 'blue_tint':
+      applyColorOverlay(imgData, cx, cy, effR, [60, 120, 255], 0.55);
       break;
   }
 
@@ -512,8 +624,12 @@ const spotTheDifference = {
     drawPhotoCover(ctx, leftImg, PANE_X_LEFT, PANE_Y, SCENE_W, SCENE_H);
     ctx.restore();
 
-    // RIGHT photo — modified copy from off-screen canvas (drawn into the pane clip)
+    // RIGHT photo — modified copy from off-screen canvas.
+    // Use imageSmoothingEnabled = false so modifications stay crisp
+    // (without this, scaling averages mod pixels with neighbors and
+    // makes the effect invisible).
     ctx.save();
+    ctx.imageSmoothingEnabled = false;
     roundRectPath(ctx, PANE_X_RIGHT, PANE_Y, SCENE_W, SCENE_H, 12);
     ctx.clip();
     if (rightCanvas) {
@@ -521,6 +637,7 @@ const spotTheDifference = {
     } else {
       drawPhotoCover(ctx, rightImg, PANE_X_RIGHT, PANE_Y, SCENE_W, SCENE_H);
     }
+    ctx.imageSmoothingEnabled = true;
     ctx.restore();
 
     // Labels above each pane
