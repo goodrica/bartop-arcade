@@ -38,6 +38,7 @@ let screenStack = [];        // 'menu' | 'playing' | 'results'
 let gameData = {};           // Per-game state (score, timer, etc.)
 let lastTime = 0;
 let running = false;
+let currentLevel = 1;        // 1 = easiest (50% boost), 2 = 40%, 3 = 30%, 4+ = normal
 
 // Touch / pointer state
 let pointerActive = false;
@@ -153,7 +154,10 @@ function handleResultsTap(x, y) {
 
   // "Play Again" button (left)
   if (x >= startX && x <= startX + btnW && y >= btnY && y <= btnY + btnH) {
-    if (currentGame) launchGame(currentGame);
+    if (currentGame) {
+      incrementLevel();
+      launchGame(currentGame);
+    }
     else screenStack = ['menu'];
     return;
   }
@@ -163,6 +167,7 @@ function handleResultsTap(x, y) {
     screenStack = ['menu'];
     if (currentGame && currentGame.cleanup) currentGame.cleanup();
     currentGame = null;
+    resetLevel();
     return;
   }
 }
@@ -200,6 +205,21 @@ export function getGameData() {
 
 export function setGameData(updates) {
   Object.assign(gameData, updates);
+}
+
+// ── Level tracking ──
+// 1 = easiest (50% boost), 2 = 40%, 3 = 30%, 4+ = normal (1.0×).
+// Bumped by 1 on each Play Again. Reset to 1 when user returns to Menu.
+export function getLevel() {
+  return currentLevel;
+}
+
+export function incrementLevel() {
+  currentLevel++;
+}
+
+export function resetLevel() {
+  currentLevel = 1;
 }
 
 // ── Drawing: Menu ──
@@ -302,7 +322,7 @@ function drawMenu() {
 }
 
 // ── Drawing: HUD during gameplay ──
-// Horizontal bar at top, score/found/timer on left, right, center.
+// Horizontal bar at top, score on left, level+found in center, timer on right.
 function drawHUD() {
   const { score, timeRemaining, totalTime, found, total } = gameData;
 
@@ -332,11 +352,14 @@ function drawHUD() {
   const secs = Math.floor(timeRemaining % 60);
   ctx.fillText(`${mins}:${secs.toString().padStart(2, '0')}`, W - 40, 40);
 
-  // Label under timer
+  // Level + label centered
   ctx.fillStyle = PALETTE.dim;
   ctx.font = '24px "Courier New", monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('TIME', W / 2, 78);
+  ctx.fillText('LEVEL', W / 2, 40);
+  ctx.fillStyle = PALETTE.neonCyan;
+  ctx.font = 'bold 32px "Courier New", monospace';
+  ctx.fillText(`${currentLevel}`, W / 2, 76);
 
   // Timer bar across the bottom of the HUD
   const barW = W - 80;
@@ -378,6 +401,13 @@ function drawResults() {
 
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
+
+  // Level badge top-right (after a win/loss, shows what level just finished)
+  ctx.fillStyle = PALETTE.dim;
+  ctx.font = 'bold 28px "Courier New", monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(`LEVEL ${currentLevel}`, W - 40, 50);
+  ctx.textAlign = 'center';
 
   if (won) {
     ctx.shadowColor = PALETTE.neonGreen;

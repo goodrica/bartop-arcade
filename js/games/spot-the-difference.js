@@ -18,40 +18,36 @@
    ============================================ */
 
 import { AudioManager } from '../audio.js';
-import { registerGame, getGameData, setGameData, pushScreen } from '../engine.js';
+import { registerGame, getGameData, setGameData, pushScreen, getLevel, incrementLevel, resetLevel } from '../engine.js';
 import { PALETTE } from '../engine.js';
 import { loadPhotosByCategory, randomCategoryId, clearCache } from '../photo-loader.js';
 
 // ── Layout (logical canvas pixels, 1920x1080 landscape) ──
-// Two photos stacked vertically (top=reference, bottom=modified).
-// Each photo is 1360x900 (1.51:1 aspect ratio, matching the asset format).
-// HUD bar at top (~100px), photo heights 880px, gap 24px.
-const PHOTO_W       = 1360;     // matches the asset photo width
-const PHOTO_H       = 900;      // matches the asset photo height
-const SCENE_X       = (1920 - PHOTO_W) / 2;   // center horizontally: 280
-const SCENE_Y_TOP   = 120;      // below the HUD bar
-const SCENE_Y_BOT   = SCENE_Y_TOP + PHOTO_H + 24;  // = 1044 -- but canvas is 1080, so this overflows
+// Two photos side-by-side. Each photo at 1.51:1 aspect (920×609).
+// HUD bar at top (~100px), photo area below.
+const DISPLAY_PHOTO_W = 920;       // pane width
+const DISPLAY_PHOTO_H = 609;       // pane height (920 / 1.51 ≈ 609)
+const PANE_GAP        = 16;        // gap between left and right panes
+const TOTAL_PANE_W    = DISPLAY_PHOTO_W * 2 + PANE_GAP;        // 1856
+const PANE_X_LEFT     = (1920 - TOTAL_PANE_W) / 2;              // = 32
+const PANE_X_RIGHT    = PANE_X_LEFT + DISPLAY_PHOTO_W + PANE_GAP; // = 968
+const PANE_Y          = 130;                                    // below HUD bar
 
-// Since 120 + 900 + 24 + 900 = 1944 > 1080, we can't stack two full-size photos.
-// Solution: scale the photos down so they fit. Two 900px-tall photos + 100 HUD + gaps = ~1080.
-// Photo height becomes (1080 - 100 - 24) / 2 = 478, so width = 478 * 1.51 = 722.
-const DISPLAY_PHOTO_H = 478;
-const DISPLAY_PHOTO_W = Math.round(DISPLAY_PHOTO_H * 1.51);  // 722
-
-// Total display height: HUD(100) + photo1(478) + gap(24) + photo2(478) = 1080 ✓
-const DISPLAY_X     = (1920 - DISPLAY_PHOTO_W) / 2;   // = 599
-const DISPLAY_Y_TOP = 110;     // below HUD bar (100px)
-const DISPLAY_Y_BOT = DISPLAY_Y_TOP + DISPLAY_PHOTO_H + 24;  // = 612
-
-// For game logic, SCENE_W/H track the DISPLAY size (where users tap),
-// not the source photo size (where mods are stored).
+// Game-logic aliases (SCENE_W/H = pane size; SCENE_X depends on which pane was tapped).
 const SCENE_W = DISPLAY_PHOTO_W;
 const SCENE_H = DISPLAY_PHOTO_H;
 
-// The off-screen canvas for modifications keeps the source photo resolution
-// so the modifications are sharp.
+// Off-screen canvas kept at source resolution for sharp modifications.
 const SRC_W = 1360;
 const SRC_H = 900;
+
+// ── Difficulty scaling ──
+// Level 1 → 1.5× (50% easier), Level 2 → 1.4×, Level 3 → 1.3×, Level 4+ → 1.0×
+// "Easier" = bigger patches + stronger modifications + larger hit zones.
+function difficultyMultiplier(level) {
+  const map = { 1: 1.5, 2: 1.4, 3: 1.3 };
+  return map[level] || 1.0;
+}
 
 const TOTAL_DIFFERENCES = 5;
 const TIME_LIMIT        = 60;
@@ -299,6 +295,8 @@ async function generateRound() {
   // Place each modification at a SMALL random point on the photo,
   // stored in DISPLAY coords (what the user sees and taps).
   // When we apply it to the source canvas, we scale up by SRC/display ratio.
+  // Difficulty scales patch radius + hit zone (lower levels = bigger/easier).
+  const diff = difficultyMultiplier(getLevel());
   const margin = 50;
   differences = chosen.map((mod, i) => {
     return {
@@ -308,9 +306,13 @@ async function generateRound() {
       // Display coords — used for tap hit-testing
       x: rand(margin, SCENE_W - margin),
       y: rand(margin, SCENE_H - margin),
-      // Visual radius scaled to display; will be scaled up for source canvas
-      r: rand(10, 22),
-      hitR: PHOTO_HIT_RADIUS,
+      // Visual radius scaled to display; will be scaled up for source canvas.
+      // Higher difficulty multiplier = bigger patch (easier to see).
+      r: rand(10, 22) * diff,
+      // Hit zone: generous even at base level, scaled up for early levels.
+      hitR: Math.round(PHOTO_HIT_RADIUS * diff),
+      // Stashed multiplier for applyModification to scale strength.
+      diffMult: diff,
       found: false,
     };
   });
@@ -351,30 +353,33 @@ function applyModification(mod) {
   const cx = srcX - x0;
   const cy = srcY - y0;
 
+  // Difficulty multiplier scales modification strength (lower level = stronger).
+  const diff = mod.diffMult || 1.0;
+
   switch (mod.type) {
     case 'brighten':
-      applyBrighten(imgData, cx, cy, r, 0.15);    // subtle, like sunlight hit
+      applyBrighten(imgData, cx, cy, r, 0.15 * diff);
       break;
     case 'darken':
-      applyDarken(imgData, cx, cy, r, 0.15);      // subtle, like a shadow
+      applyDarken(imgData, cx, cy, r, 0.15 * diff);
       break;
     case 'saturate':
-      applySaturation(imgData, cx, cy, r, 1.25);  // slightly more vibrant
+      applySaturation(imgData, cx, cy, r, 1 + (1.25 - 1) * diff);
       break;
     case 'desaturate':
-      applySaturation(imgData, cx, cy, r, 0.6);   // slightly less vibrant
+      applySaturation(imgData, cx, cy, r, 1 - (1 - 0.6) * diff);
       break;
     case 'hue_warm':
-      applyHueShift(imgData, cx, cy, r, -8);      // like red→pink
+      applyHueShift(imgData, cx, cy, r, -8 * diff);
       break;
     case 'hue_cool':
-      applyHueShift(imgData, cx, cy, r, 8);       // like blue→cyan
+      applyHueShift(imgData, cx, cy, r, 8 * diff);
       break;
     case 'blur_patch':
-      applyBlur(imgData, cx, cy, r, 0.4);         // mild softening
+      applyBlur(imgData, cx, cy, r, 0.4 * diff);
       break;
     case 'sharpen':
-      applySharpen(imgData, cx, cy, r, 0.25);     // mild edge boost
+      applySharpen(imgData, cx, cy, r, 0.25 * diff);
       break;
   }
 
@@ -496,40 +501,40 @@ const spotTheDifference = {
     if (splashTimer > 0) { drawSplash(ctx); return; }
     if (data.loading || !leftImg || !rightImg) { drawLoading(ctx, data); return; }
 
-    // Photo borders (top=reference, bottom=modified)
-    drawPhotoFrame(ctx, DISPLAY_X, DISPLAY_Y_TOP, SCENE_W, SCENE_H);
-    drawPhotoFrame(ctx, DISPLAY_X, DISPLAY_Y_BOT, SCENE_W, SCENE_H);
+    // Photo borders (left=reference, right=modified)
+    drawPhotoFrame(ctx, PANE_X_LEFT, PANE_Y, SCENE_W, SCENE_H);
+    drawPhotoFrame(ctx, PANE_X_RIGHT, PANE_Y, SCENE_W, SCENE_H);
 
-    // TOP photo — clean reference
+    // LEFT photo — clean reference
     ctx.save();
-    roundRectPath(ctx, DISPLAY_X, DISPLAY_Y_TOP, SCENE_W, SCENE_H, 12);
+    roundRectPath(ctx, PANE_X_LEFT, PANE_Y, SCENE_W, SCENE_H, 12);
     ctx.clip();
-    drawPhotoCover(ctx, leftImg, DISPLAY_X, DISPLAY_Y_TOP, SCENE_W, SCENE_H);
+    drawPhotoCover(ctx, leftImg, PANE_X_LEFT, PANE_Y, SCENE_W, SCENE_H);
     ctx.restore();
 
-    // BOTTOM photo — modified copy from off-screen canvas (draw at source res, scaled by clip)
+    // RIGHT photo — modified copy from off-screen canvas (drawn into the pane clip)
     ctx.save();
-    roundRectPath(ctx, DISPLAY_X, DISPLAY_Y_BOT, SCENE_W, SCENE_H, 12);
+    roundRectPath(ctx, PANE_X_RIGHT, PANE_Y, SCENE_W, SCENE_H, 12);
     ctx.clip();
     if (rightCanvas) {
-      ctx.drawImage(rightCanvas, DISPLAY_X, DISPLAY_Y_BOT, SCENE_W, SCENE_H);
+      ctx.drawImage(rightCanvas, PANE_X_RIGHT, PANE_Y, SCENE_W, SCENE_H);
     } else {
-      drawPhotoCover(ctx, rightImg, DISPLAY_X, DISPLAY_Y_BOT, SCENE_W, SCENE_H);
+      drawPhotoCover(ctx, rightImg, PANE_X_RIGHT, PANE_Y, SCENE_W, SCENE_H);
     }
     ctx.restore();
 
-    // Side labels (above each photo)
+    // Labels above each pane
     ctx.textAlign = 'center';
     ctx.font = 'bold 22px "Courier New", monospace';
     ctx.fillStyle = PALETTE.dim;
-    ctx.fillText('REFERENCE', DISPLAY_X + SCENE_W / 2, DISPLAY_Y_TOP - 10);
-    ctx.fillText('FIND CHANGES', DISPLAY_X + SCENE_W / 2, DISPLAY_Y_BOT - 10);
+    ctx.fillText('REFERENCE', PANE_X_LEFT + SCENE_W / 2, PANE_Y - 12);
+    ctx.fillText('FIND CHANGES', PANE_X_RIGHT + SCENE_W / 2, PANE_Y - 12);
 
     // Found-difference highlights (green circle + check on both panes)
     for (const mod of differences) {
       if (!mod.found) continue;
-      drawFoundHighlight(ctx, mod, DISPLAY_X, DISPLAY_Y_TOP);
-      drawFoundHighlight(ctx, mod, DISPLAY_X, DISPLAY_Y_BOT);
+      drawFoundHighlight(ctx, mod, PANE_X_LEFT, PANE_Y);
+      drawFoundHighlight(ctx, mod, PANE_X_RIGHT, PANE_Y);
     }
 
     // Found particles
@@ -562,15 +567,16 @@ const spotTheDifference = {
     if (data.gameOver || splashTimer > 0 || data.loading) return;
     if (differences.length === 0) return;
 
-    const inTop    = x >= DISPLAY_X     && x <= DISPLAY_X     + SCENE_W &&
-                     y >= DISPLAY_Y_TOP && y <= DISPLAY_Y_TOP + SCENE_H;
-    const inBottom = x >= DISPLAY_X     && x <= DISPLAY_X     + SCENE_W &&
-                     y >= DISPLAY_Y_BOT && y <= DISPLAY_Y_BOT + SCENE_H;
-    if (!inTop && !inBottom) return;
+    // Tap must be inside one of the photo panes (left or right)
+    const inLeft  = x >= PANE_X_LEFT  && x <= PANE_X_LEFT  + SCENE_W &&
+                     y >= PANE_Y      && y <= PANE_Y      + SCENE_H;
+    const inRight = x >= PANE_X_RIGHT && x <= PANE_X_RIGHT + SCENE_W &&
+                     y >= PANE_Y      && y <= PANE_Y      + SCENE_H;
+    if (!inLeft && !inRight) return;
 
-    const sceneY = inTop ? DISPLAY_Y_TOP : DISPLAY_Y_BOT;
-    const relX = x - DISPLAY_X;
-    const relY = y - sceneY;
+    const sceneX = inLeft ? PANE_X_LEFT : PANE_X_RIGHT;
+    const relX = x - sceneX;
+    const relY = y - PANE_Y;
 
     let hitIndex = -1;
     for (let i = 0; i < differences.length; i++) {
@@ -592,7 +598,7 @@ const spotTheDifference = {
 
       foundParticles.push({
         x: sceneX + mod.x,
-        y: SCENE_Y + mod.y,
+        y: PANE_Y + mod.y,
         radius: 10,
         life: 1.0,
         maxLife: 1.0,
@@ -647,6 +653,14 @@ function drawSplash(ctx) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
+  // Level badge in upper-left corner
+  const level = getLevel();
+  ctx.fillStyle = PALETTE.dim;
+  ctx.font = 'bold 28px "Courier New", monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(`LEVEL ${level}`, 40, 50);
+  ctx.textAlign = 'center';
+
   ctx.shadowColor = PALETTE.neonCyan;
   ctx.shadowBlur = 60;
   ctx.fillStyle = PALETTE.neonCyan;
@@ -665,6 +679,14 @@ function drawSplash(ctx) {
   ctx.fillStyle = PALETTE.dim;
   ctx.font = '28px "Courier New", monospace';
   ctx.fillText('Wrong taps cost 5 seconds', 960, 600);
+
+  // Difficulty hint for early levels (level 1 = 50% easier, etc.)
+  if (level <= 3) {
+    const bonusMap = { 1: 50, 2: 40, 3: 30 };
+    ctx.fillStyle = PALETTE.neonGreen;
+    ctx.font = 'bold 28px "Courier New", monospace';
+    ctx.fillText(`LEVEL ${level}: ${bonusMap[level]}% EASIER`, 960, 660);
+  }
 
   const count = Math.ceil(splashTimer);
   ctx.fillStyle = PALETTE.neonAmber;
@@ -754,15 +776,16 @@ registerGame(spotTheDifference);
 // tap them deterministically. Harmless in production (read-only).
 window.__photoHuntDebug = () => {
   if (!differences.length) return null;
-  // Positions are returned in display-coords (relative to top photo).
-  // Caller (test) must add DISPLAY_Y_TOP to y, or DISPLAY_Y_BOT to y for bottom.
+  // Positions are returned in canvas coords (relative to the right pane).
+  // Caller can also derive left-pane coords by swapping sceneX if needed.
   return differences.map(m => ({
     type: m.type,
     hint: m.hint,
-    x: Math.round(m.x + DISPLAY_X),
-    y: Math.round(m.y + DISPLAY_Y_TOP),
+    x: Math.round(m.x + PANE_X_LEFT),
+    y: Math.round(m.y + PANE_Y),
     hitR: m.hitR,
     found: m.found,
+    diffMult: m.diffMult,
   }));
 };
 
