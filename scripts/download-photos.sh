@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Download curated stock photos to assets/photos/ for offline use.
 # Photos are CC0 via Picsum (Unsplash) — see README for attribution.
-# Run once after cloning the repo, or to refresh the photo set.
+# Landscape 1.51:1 aspect ratio (suitable for 17" widescreen touchscreen).
 set -euo pipefail
 
 DEST="$(cd "$(dirname "$0")/../assets/photos" && pwd)"
@@ -21,7 +21,8 @@ CATEGORIES=(
   "abstract:color texture pattern wave smoke glass metal water light shadow"
 )
 
-WIDTH=510
+# 1.51:1 aspect ratio — 1360 x 900
+WIDTH=1360
 HEIGHT=900
 
 count=0
@@ -42,7 +43,6 @@ for cat in "${CATEGORIES[@]}"; do
       echo "FAILED: ${seed}" >&2
       rm -f "$out"
     fi
-    # Small sleep to be nice to picsum
     sleep 0.1
   done
 done

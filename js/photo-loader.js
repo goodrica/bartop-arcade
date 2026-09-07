@@ -25,6 +25,9 @@ export const CATEGORIES = [
   { id: 'space',    files: ['galaxy','nebula','moon','mars','stars','milky-way','astronaut','rocket','eclipse','saturn'] },
   { id: 'random',   files: ['surprise1','surprise2','surprise3','surprise4','surprise5'] },
   { id: 'abstract', files: ['color','texture','pattern','wave','smoke','glass','metal','water','light','shadow'] },
+  // User-purchased stock photos (full license: use in commercial projects, including video games).
+  // See README for attribution.
+  { id: 'purchased', files: ['sierra-mountains','tennis-girls'] },
 ];
 
 // ── Image cache ──

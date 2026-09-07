@@ -29,9 +29,9 @@ export const PALETTE = {
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
-// Logical resolution (portrait touchscreen)
-const W = 1080;
-const H = 1920;
+// Logical resolution (17" widescreen touchscreen, 1.78:1)
+const W = 1920;
+const H = 1080;
 
 let currentGame = null;      // Loaded game module
 let screenStack = [];        // 'menu' | 'playing' | 'results'
@@ -127,13 +127,15 @@ export function registerGame(module) {
 }
 
 function handleMenuTap(x, y) {
-  const cardH = 260;
-  const gap = 30;
-  const startY = 400;
+  const cardW = 900;
+  const cardH = 200;
+  const gap = 24;
+  const startX = (W - cardW) / 2;
+  const startY = 280;
 
   for (let i = 0; i < menuGames.length; i++) {
     const cy = startY + i * (cardH + gap);
-    if (x >= 90 && x <= 990 && y >= cy && y <= cy + cardH) {
+    if (x >= startX && x <= startX + cardW && y >= cy && y <= cy + cardH) {
       launchGame(menuGames[i]);
       return;
     }
@@ -141,14 +143,23 @@ function handleMenuTap(x, y) {
 }
 
 function handleResultsTap(x, y) {
-  // "Play Again" button
-  if (x >= 340 && x <= 740 && y >= 1400 && y <= 1520) {
+  // Buttons: two side-by-side at the bottom — see drawResults()
+  const btnW = 360;
+  const btnH = 100;
+  const gap = 60;
+  const totalBtnW = btnW * 2 + gap;
+  const startX = (W - totalBtnW) / 2;
+  const btnY = 800;
+
+  // "Play Again" button (left)
+  if (x >= startX && x <= startX + btnW && y >= btnY && y <= btnY + btnH) {
     if (currentGame) launchGame(currentGame);
     else screenStack = ['menu'];
     return;
   }
-  // "Menu" button
-  if (x >= 340 && x <= 740 && y >= 1560 && y <= 1680) {
+  // "Menu" button (right)
+  const menuX = startX + btnW + gap;
+  if (x >= menuX && x <= menuX + btnW && y >= btnY && y <= btnY + btnH) {
     screenStack = ['menu'];
     if (currentGame && currentGame.cleanup) currentGame.cleanup();
     currentGame = null;
@@ -192,9 +203,11 @@ export function setGameData(updates) {
 }
 
 // ── Drawing: Menu ──
+// Layout: 1920x1080 landscape. Title at top-center, game cards in a
+// vertical stack on the left half, info/credits on the right.
 function drawMenu() {
   // Background
-  const grad = ctx.createRadialGradient(540, 960, 100, 540, 960, 1200);
+  const grad = ctx.createRadialGradient(W / 2, H / 2, 100, W / 2, H / 2, 1400);
   grad.addColorStop(0, PALETTE.bgLight);
   grad.addColorStop(1, PALETTE.bg);
   ctx.fillStyle = grad;
@@ -202,133 +215,141 @@ function drawMenu() {
 
   // Decorative grid dots
   ctx.fillStyle = PALETTE.dim;
-  for (let x = 0; x < W; x += 60) {
-    for (let y = 0; y < H; y += 60) {
+  for (let x = 0; x < W; x += 80) {
+    for (let y = 0; y < H; y += 80) {
       ctx.beginPath();
       ctx.arc(x, y, 2, 0, Math.PI * 2);
       ctx.fill();
     }
   }
 
-  // Title
+  // Title — centered top
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
-  // Glow for title
   ctx.shadowColor = PALETTE.neonCyan;
-  ctx.shadowBlur = 40;
+  ctx.shadowBlur = 50;
   ctx.fillStyle = PALETTE.neonCyan;
-  ctx.font = 'bold 96px "Courier New", monospace';
-  ctx.fillText('BARTOP', 540, 140);
+  ctx.font = 'bold 88px "Courier New", monospace';
+  ctx.fillText('BARTOP', W / 2, 70);
   ctx.shadowColor = PALETTE.neonPink;
-  ctx.shadowBlur = 40;
+  ctx.shadowBlur = 50;
   ctx.fillStyle = PALETTE.neonPink;
-  ctx.fillText('ARCADE', 540, 260);
+  ctx.fillText('ARCADE', W / 2, 170);
   ctx.shadowBlur = 0;
 
   // Subtitle
   ctx.fillStyle = PALETTE.dim;
-  ctx.font = '28px "Courier New", monospace';
-  ctx.fillText('TOUCH TO PLAY', 540, 330);
+  ctx.font = '24px "Courier New", monospace';
+  ctx.fillText('TOUCH A CARD TO PLAY', W / 2, 230);
 
-  // Game cards
+  // Game cards — full-width stack, top-center area
   const cardW = 900;
-  const cardH = 260;
-  const gap = 30;
-  const startY = 400;
+  const cardH = 200;
+  const gap = 24;
+  const startX = (W - cardW) / 2;
+  const startY = 280;
 
   for (let i = 0; i < menuGames.length; i++) {
     const cy = startY + i * (cardH + gap);
+    if (cy + cardH > H - 80) break;  // off-screen guard
     const game = menuGames[i];
-    const isHovered = pointerActive && pointerX >= 90 && pointerX <= 990 && pointerY >= cy && pointerY <= cy + cardH;
+    const isHovered = pointerActive && pointerX >= startX && pointerX <= startX + cardW &&
+                                  pointerY >= cy && pointerY <= cy + cardH;
 
     // Card bg
     ctx.shadowColor = PALETTE.shadow;
     ctx.shadowBlur = 20;
     ctx.fillStyle = isHovered ? PALETTE.bgLight : PALETTE.bgCard;
-    roundRect(ctx, 90, cy, cardW, cardH, 24);
+    roundRect(ctx, startX, cy, cardW, cardH, 20);
     ctx.fill();
     ctx.shadowBlur = 0;
 
     // Neon border
     ctx.strokeStyle = isHovered ? PALETTE.neonCyan : PALETTE.dim;
     ctx.lineWidth = isHovered ? 3 : 1;
-    roundRect(ctx, 90, cy, cardW, cardH, 24);
+    roundRect(ctx, startX, cy, cardW, cardH, 20);
     ctx.stroke();
 
-    // Game icon placeholder
+    // Game icon
     ctx.fillStyle = PALETTE.dim;
-    ctx.font = '64px "Courier New", monospace';
+    ctx.font = '52px "Courier New", monospace';
     ctx.textAlign = 'left';
-    ctx.fillText('▶', 140, cy + cardH / 2);
+    ctx.fillText('▶', startX + 50, cy + cardH / 2);
 
     // Game name
     ctx.fillStyle = PALETTE.white;
-    ctx.font = 'bold 48px "Courier New", monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText(game.name || 'Unknown Game', 230, cy + cardH / 2 - 10);
+    ctx.font = 'bold 42px "Courier New", monospace';
+    ctx.fillText(game.name || 'Unknown Game', startX + 130, cy + cardH / 2 - 14);
 
     // Description
     ctx.fillStyle = PALETTE.dim;
-    ctx.font = '26px "Courier New", monospace';
-    ctx.fillText(game.description || '', 230, cy + cardH / 2 + 50);
+    ctx.font = '24px "Courier New", monospace';
+    ctx.fillText(game.description || '', startX + 130, cy + cardH / 2 + 30);
 
     // Play indicator
     ctx.fillStyle = isHovered ? PALETTE.neonGreen : PALETTE.dim;
-    ctx.font = '32px "Courier New", monospace';
+    ctx.font = '28px "Courier New", monospace';
     ctx.textAlign = 'right';
-    ctx.fillText(isHovered ? '▶ PLAY' : '•', 960, cy + cardH / 2);
+    ctx.fillText(isHovered ? '▶ PLAY' : '•', startX + cardW - 50, cy + cardH / 2);
   }
 
   // Footer
   ctx.textAlign = 'center';
   ctx.fillStyle = PALETTE.dim;
   ctx.font = '20px "Courier New", monospace';
-  ctx.fillText('v1.0 — Inspired by arcade classics', 540, H - 60);
+  ctx.fillText('v1.0 — Inspired by arcade classics', W / 2, H - 30);
 }
 
 // ── Drawing: HUD during gameplay ──
+// Horizontal bar at top, score/found/timer on left, right, center.
 function drawHUD() {
   const { score, timeRemaining, totalTime, found, total } = gameData;
 
   // Top bar background
+  const barH = 100;
   ctx.fillStyle = 'rgba(10, 10, 15, 0.85)';
-  ctx.fillRect(0, 0, W, 120);
+  ctx.fillRect(0, 0, W, barH);
 
-  // Score
+  // Score — left
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = PALETTE.neonAmber;
-  ctx.font = 'bold 40px "Courier New", monospace';
-  ctx.fillText(`SCORE: ${score}`, 40, 60);
+  ctx.font = 'bold 36px "Courier New", monospace';
+  ctx.fillText(`SCORE: ${score}`, 40, 40);
 
-  // Found / Total
-  ctx.textAlign = 'center';
+  // Found / Total — under score
   ctx.fillStyle = PALETTE.white;
-  ctx.font = '36px "Courier New", monospace';
-  ctx.fillText(`${found} / ${total}`, 540, 60);
+  ctx.font = '28px "Courier New", monospace';
+  ctx.fillText(`${found} / ${total}`, 40, 78);
 
-  // Timer
+  // Timer — right
   ctx.textAlign = 'right';
   const timeColor = timeRemaining <= 10 ? PALETTE.neonPink : PALETTE.neonCyan;
   ctx.fillStyle = timeColor;
-  ctx.font = 'bold 40px "Courier New", monospace';
+  ctx.font = 'bold 36px "Courier New", monospace';
   const mins = Math.floor(timeRemaining / 60);
   const secs = Math.floor(timeRemaining % 60);
-  ctx.fillText(`${mins}:${secs.toString().padStart(2, '0')}`, W - 40, 60);
+  ctx.fillText(`${mins}:${secs.toString().padStart(2, '0')}`, W - 40, 40);
 
-  // Timer bar
+  // Label under timer
+  ctx.fillStyle = PALETTE.dim;
+  ctx.font = '24px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('TIME', W / 2, 78);
+
+  // Timer bar across the bottom of the HUD
   const barW = W - 80;
-  const barH = 8;
-  const barY = 100;
+  const barBh = 6;
+  const barY = 90;
   const ratio = Math.max(0, timeRemaining / totalTime);
 
   ctx.fillStyle = PALETTE.bgLight;
-  roundRect(ctx, 40, barY, barW, barH, 4);
+  roundRect(ctx, 40, barY, barW, barBh, 3);
   ctx.fill();
 
   ctx.fillStyle = timeColor;
-  roundRect(ctx, 40, barY, barW * ratio, barH, 4);
+  roundRect(ctx, 40, barY, barW * ratio, barBh, 3);
   ctx.fill();
 }
 
@@ -347,6 +368,7 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 // ── Drawing: Results ──
+// 1920x1080 landscape: title at top, stats centered, buttons side-by-side at bottom.
 function drawResults() {
   const { score, found, total, wrongTaps, won } = gameData;
 
@@ -354,7 +376,6 @@ function drawResults() {
   ctx.fillStyle = 'rgba(10, 10, 15, 0.95)';
   ctx.fillRect(0, 0, W, H);
 
-  // Title
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
@@ -362,62 +383,72 @@ function drawResults() {
     ctx.shadowColor = PALETTE.neonGreen;
     ctx.shadowBlur = 60;
     ctx.fillStyle = PALETTE.neonGreen;
-    ctx.font = 'bold 80px "Courier New", monospace';
-    ctx.fillText('YOU WIN!', 540, 300);
+    ctx.font = 'bold 88px "Courier New", monospace';
+    ctx.fillText('YOU WIN!', W / 2, 180);
     ctx.shadowBlur = 0;
   } else {
     ctx.shadowColor = PALETTE.neonPink;
     ctx.shadowBlur = 60;
     ctx.fillStyle = PALETTE.neonPink;
-    ctx.font = 'bold 80px "Courier New", monospace';
-    ctx.fillText('TIME\'S UP!', 540, 300);
+    ctx.font = 'bold 88px "Courier New", monospace';
+    ctx.fillText("TIME'S UP", W / 2, 180);
     ctx.shadowBlur = 0;
   }
 
-  // Score big
+  // Big score
   ctx.fillStyle = PALETTE.neonAmber;
-  ctx.font = 'bold 120px "Courier New", monospace';
-  ctx.fillText(score, 540, 520);
+  ctx.font = 'bold 140px "Courier New", monospace';
+  ctx.fillText(score, W / 2, 400);
 
   // Stats
   ctx.fillStyle = PALETTE.white;
-  ctx.font = '40px "Courier New", monospace';
-  ctx.fillText(`${found} / ${total} differences found`, 540, 700);
+  ctx.font = '38px "Courier New", monospace';
+  ctx.fillText(`${found} / ${total} differences found`, W / 2, 580);
 
   ctx.fillStyle = PALETTE.dim;
-  ctx.font = '32px "Courier New", monospace';
-  ctx.fillText(`Wrong taps: ${wrongTaps}`, 540, 780);
+  ctx.font = '30px "Courier New", monospace';
+  ctx.fillText(`Wrong taps: ${wrongTaps}`, W / 2, 640);
 
-  // Buttons
+  // Buttons — side by side at bottom
+  const btnW = 360;
+  const btnH = 100;
+  const gap = 60;
+  const totalBtnW = btnW * 2 + gap;
+  const startX = (W - totalBtnW) / 2;
+  const btnY = 800;
+
   // Play Again
-  const isHoverPA = pointerActive && pointerX >= 340 && pointerX <= 740 && pointerY >= 1400 && pointerY <= 1520;
+  const paX = startX;
+  const isHoverPA = pointerActive && pointerX >= paX && pointerX <= paX + btnW &&
+                                 pointerY >= btnY && pointerY <= btnY + btnH;
   ctx.shadowColor = PALETTE.shadow;
   ctx.shadowBlur = 15;
   ctx.fillStyle = isHoverPA ? PALETTE.neonCyan : PALETTE.bgCard;
-  roundRect(ctx, 340, 1400, 400, 120, 20);
+  roundRect(ctx, paX, btnY, btnW, btnH, 16);
   ctx.fill();
   ctx.shadowBlur = 0;
   ctx.strokeStyle = PALETTE.neonCyan;
   ctx.lineWidth = 2;
-  roundRect(ctx, 340, 1400, 400, 120, 20);
+  roundRect(ctx, paX, btnY, btnW, btnH, 16);
   ctx.stroke();
   ctx.fillStyle = PALETTE.white;
-  ctx.font = 'bold 40px "Courier New", monospace';
-  ctx.textAlign = 'center';
-  ctx.fillText('PLAY AGAIN', 540, 1460);
+  ctx.font = 'bold 36px "Courier New", monospace';
+  ctx.fillText('PLAY AGAIN', paX + btnW / 2, btnY + btnH / 2);
 
   // Menu
-  const isHoverM = pointerActive && pointerX >= 340 && pointerX <= 740 && pointerY >= 1560 && pointerY <= 1680;
+  const mX = startX + btnW + gap;
+  const isHoverM = pointerActive && pointerX >= mX && pointerX <= mX + btnW &&
+                                pointerY >= btnY && pointerY <= btnY + btnH;
   ctx.fillStyle = isHoverM ? PALETTE.neonPurple : PALETTE.bgCard;
-  roundRect(ctx, 340, 1560, 400, 120, 20);
+  roundRect(ctx, mX, btnY, btnW, btnH, 16);
   ctx.fill();
   ctx.strokeStyle = PALETTE.neonPurple;
   ctx.lineWidth = 2;
-  roundRect(ctx, 340, 1560, 400, 120, 20);
+  roundRect(ctx, mX, btnY, btnW, btnH, 16);
   ctx.stroke();
   ctx.fillStyle = PALETTE.white;
-  ctx.font = 'bold 40px "Courier New", monospace';
-  ctx.fillText('MENU', 540, 1620);
+  ctx.font = 'bold 36px "Courier New", monospace';
+  ctx.fillText('MENU', mX + btnW / 2, btnY + btnH / 2);
 }
 
 // ── Main Loop ──

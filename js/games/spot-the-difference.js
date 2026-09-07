@@ -22,12 +22,36 @@ import { registerGame, getGameData, setGameData, pushScreen } from '../engine.js
 import { PALETTE } from '../engine.js';
 import { loadPhotosByCategory, randomCategoryId, clearCache } from '../photo-loader.js';
 
-// ── Layout (logical canvas pixels, 1080x1920 portrait) ──
-const SCENE_W       = 500;
-const SCENE_H       = 900;
-const SCENE_Y       = 160;
-const SCENE_X_LEFT  = 40;
-const SCENE_X_RIGHT = 540;
+// ── Layout (logical canvas pixels, 1920x1080 landscape) ──
+// Two photos stacked vertically (top=reference, bottom=modified).
+// Each photo is 1360x900 (1.51:1 aspect ratio, matching the asset format).
+// HUD bar at top (~100px), photo heights 880px, gap 24px.
+const PHOTO_W       = 1360;     // matches the asset photo width
+const PHOTO_H       = 900;      // matches the asset photo height
+const SCENE_X       = (1920 - PHOTO_W) / 2;   // center horizontally: 280
+const SCENE_Y_TOP   = 120;      // below the HUD bar
+const SCENE_Y_BOT   = SCENE_Y_TOP + PHOTO_H + 24;  // = 1044 -- but canvas is 1080, so this overflows
+
+// Since 120 + 900 + 24 + 900 = 1944 > 1080, we can't stack two full-size photos.
+// Solution: scale the photos down so they fit. Two 900px-tall photos + 100 HUD + gaps = ~1080.
+// Photo height becomes (1080 - 100 - 24) / 2 = 478, so width = 478 * 1.51 = 722.
+const DISPLAY_PHOTO_H = 478;
+const DISPLAY_PHOTO_W = Math.round(DISPLAY_PHOTO_H * 1.51);  // 722
+
+// Total display height: HUD(100) + photo1(478) + gap(24) + photo2(478) = 1080 ✓
+const DISPLAY_X     = (1920 - DISPLAY_PHOTO_W) / 2;   // = 599
+const DISPLAY_Y_TOP = 110;     // below HUD bar (100px)
+const DISPLAY_Y_BOT = DISPLAY_Y_TOP + DISPLAY_PHOTO_H + 24;  // = 612
+
+// For game logic, SCENE_W/H track the DISPLAY size (where users tap),
+// not the source photo size (where mods are stored).
+const SCENE_W = DISPLAY_PHOTO_W;
+const SCENE_H = DISPLAY_PHOTO_H;
+
+// The off-screen canvas for modifications keeps the source photo resolution
+// so the modifications are sharp.
+const SRC_W = 1360;
+const SRC_H = 900;
 
 const TOTAL_DIFFERENCES = 5;
 const TIME_LIMIT        = 60;
@@ -255,14 +279,14 @@ async function generateRound() {
   rightImg = imgs[0];   // SAME photo — modifications applied via off-screen canvas
   loadError = null;
 
-  // Off-screen canvas for the modified right photo
+  // Off-screen canvas at SOURCE resolution (sharp modifications)
   if (!rightCanvas) {
     rightCanvas = document.createElement('canvas');
   }
-  rightCanvas.width = SCENE_W;
-  rightCanvas.height = SCENE_H;
+  rightCanvas.width = SRC_W;
+  rightCanvas.height = SRC_H;
   rightCtx = rightCanvas.getContext('2d', { willReadFrequently: true });
-  drawPhotoCover(rightCtx, rightImg, 0, 0, SCENE_W, SCENE_H);
+  drawPhotoCover(rightCtx, rightImg, 0, 0, SRC_W, SRC_H);
 
   // Pick 5 unique modification types
   const pool = [...MOD_TYPES];
@@ -272,18 +296,21 @@ async function generateRound() {
   }
   const chosen = pool.slice(0, TOTAL_DIFFERENCES);
 
-  // Place each modification at a SMALL random point on the photo
-  // (small radius = subtle change, like a single petal or leaf)
+  // Place each modification at a SMALL random point on the photo,
+  // stored in DISPLAY coords (what the user sees and taps).
+  // When we apply it to the source canvas, we scale up by SRC/display ratio.
+  const margin = 50;
   differences = chosen.map((mod, i) => {
-    const margin = 60;
     return {
       key: `${mod.type}-${i}-${Date.now()}`,
       type: mod.type,
       hint: mod.hint,
+      // Display coords — used for tap hit-testing
       x: rand(margin, SCENE_W - margin),
       y: rand(margin, SCENE_H - margin),
-      r: rand(12, 28),          // SMALL patches (was 45-65)
-      hitR: PHOTO_HIT_RADIUS,   // touch hit zone stays generous for fingers
+      // Visual radius scaled to display; will be scaled up for source canvas
+      r: rand(10, 22),
+      hitR: PHOTO_HIT_RADIUS,
       found: false,
     };
   });
@@ -301,18 +328,28 @@ async function generateRound() {
 // natural photo details (a petal slightly different, one leaf darker)
 // not obvious color shifts. Megatouch Photo Hunt's whole challenge is
 // that the changes are tiny.
+//
+// The diff is stored in DISPLAY coords; we scale up to SOURCE coords when
+// drawing on the off-screen canvas (which is at source resolution).
 function applyModification(mod) {
-  const r = Math.ceil(mod.r);
-  const x0 = Math.max(0, Math.floor(mod.x - r));
-  const y0 = Math.max(0, Math.floor(mod.y - r));
-  const w  = Math.min(SCENE_W - x0, r * 2);
-  const h  = Math.min(SCENE_H - y0, r * 2);
+  const scaleX = SRC_W / SCENE_W;
+  const scaleY = SRC_H / SCENE_H;
+
+  const srcX = mod.x * scaleX;
+  const srcY = mod.y * scaleY;
+  const srcR = mod.r * scaleX;
+
+  const r = Math.ceil(srcR);
+  const x0 = Math.max(0, Math.floor(srcX - r));
+  const y0 = Math.max(0, Math.floor(srcY - r));
+  const w  = Math.min(SRC_W - x0, r * 2);
+  const h  = Math.min(SRC_H - y0, r * 2);
 
   if (w <= 0 || h <= 0) return;
 
   const imgData = rightCtx.getImageData(x0, y0, w, h);
-  const cx = mod.x - x0;
-  const cy = mod.y - y0;
+  const cx = srcX - x0;
+  const cy = srcY - y0;
 
   switch (mod.type) {
     case 'brighten':
@@ -454,46 +491,45 @@ const spotTheDifference = {
 
     // Dark background
     ctx.fillStyle = '#0a0a0f';
-    ctx.fillRect(0, 0, 1080, 1920);
+    ctx.fillRect(0, 0, 1920, 1080);
 
     if (splashTimer > 0) { drawSplash(ctx); return; }
     if (data.loading || !leftImg || !rightImg) { drawLoading(ctx, data); return; }
 
-    // Photo borders
-    drawPhotoFrame(ctx, SCENE_X_LEFT, SCENE_Y, SCENE_W, SCENE_H);
-    drawPhotoFrame(ctx, SCENE_X_RIGHT, SCENE_Y, SCENE_W, SCENE_H);
+    // Photo borders (top=reference, bottom=modified)
+    drawPhotoFrame(ctx, DISPLAY_X, DISPLAY_Y_TOP, SCENE_W, SCENE_H);
+    drawPhotoFrame(ctx, DISPLAY_X, DISPLAY_Y_BOT, SCENE_W, SCENE_H);
 
-    // LEFT photo — clean reference, drawn to its pane origin
+    // TOP photo — clean reference
     ctx.save();
-    roundRectPath(ctx, SCENE_X_LEFT, SCENE_Y, SCENE_W, SCENE_H, 12);
+    roundRectPath(ctx, DISPLAY_X, DISPLAY_Y_TOP, SCENE_W, SCENE_H, 12);
     ctx.clip();
-    drawPhotoCover(ctx, leftImg, SCENE_X_LEFT, SCENE_Y, SCENE_W, SCENE_H);
+    drawPhotoCover(ctx, leftImg, DISPLAY_X, DISPLAY_Y_TOP, SCENE_W, SCENE_H);
     ctx.restore();
 
-    // RIGHT photo — modified copy from off-screen canvas
+    // BOTTOM photo — modified copy from off-screen canvas (draw at source res, scaled by clip)
     ctx.save();
-    roundRectPath(ctx, SCENE_X_RIGHT, SCENE_Y, SCENE_W, SCENE_H, 12);
+    roundRectPath(ctx, DISPLAY_X, DISPLAY_Y_BOT, SCENE_W, SCENE_H, 12);
     ctx.clip();
     if (rightCanvas) {
-      ctx.drawImage(rightCanvas, SCENE_X_RIGHT, SCENE_Y);
+      ctx.drawImage(rightCanvas, DISPLAY_X, DISPLAY_Y_BOT, SCENE_W, SCENE_H);
     } else {
-      drawPhotoCover(ctx, rightImg, SCENE_X_RIGHT, SCENE_Y, SCENE_W, SCENE_H);
+      drawPhotoCover(ctx, rightImg, DISPLAY_X, DISPLAY_Y_BOT, SCENE_W, SCENE_H);
     }
     ctx.restore();
 
-    // Side labels (above photos)
+    // Side labels (above each photo)
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
+    ctx.font = 'bold 22px "Courier New", monospace';
     ctx.fillStyle = PALETTE.dim;
-    ctx.font = 'bold 24px "Courier New", monospace';
-    ctx.fillText('REFERENCE', SCENE_X_LEFT + SCENE_W / 2, SCENE_Y - 18);
-    ctx.fillText('FIND CHANGES', SCENE_X_RIGHT + SCENE_W / 2, SCENE_Y - 18);
+    ctx.fillText('REFERENCE', DISPLAY_X + SCENE_W / 2, DISPLAY_Y_TOP - 10);
+    ctx.fillText('FIND CHANGES', DISPLAY_X + SCENE_W / 2, DISPLAY_Y_BOT - 10);
 
-    // Found-difference highlights (green circle + check on both sides)
+    // Found-difference highlights (green circle + check on both panes)
     for (const mod of differences) {
       if (!mod.found) continue;
-      drawFoundHighlight(ctx, mod, SCENE_X_LEFT, SCENE_Y);
-      drawFoundHighlight(ctx, mod, SCENE_X_RIGHT, SCENE_Y);
+      drawFoundHighlight(ctx, mod, DISPLAY_X, DISPLAY_Y_TOP);
+      drawFoundHighlight(ctx, mod, DISPLAY_X, DISPLAY_Y_BOT);
     }
 
     // Found particles
@@ -510,14 +546,14 @@ const spotTheDifference = {
     // Wrong-tap red flash
     if (wrongFlash > 0) {
       ctx.fillStyle = `rgba(255, 51, 85, ${wrongFlash * 0.5})`;
-      ctx.fillRect(0, 0, 1080, 1920);
+      ctx.fillRect(0, 0, 1920, 1080);
     }
 
     // Low-time warning
     if (data.timeRemaining <= 10 && warningFlash > 0) {
       const a = Math.sin(Date.now() / 150) * 0.12 + 0.12;
       ctx.fillStyle = `rgba(255, 51, 85, ${a})`;
-      ctx.fillRect(0, 0, 1080, SCENE_Y);
+      ctx.fillRect(0, 0, 1920, 110);
     }
   },
 
@@ -526,15 +562,15 @@ const spotTheDifference = {
     if (data.gameOver || splashTimer > 0 || data.loading) return;
     if (differences.length === 0) return;
 
-    const inLeft  = x >= SCENE_X_LEFT  && x <= SCENE_X_LEFT  + SCENE_W &&
-                    y >= SCENE_Y       && y <= SCENE_Y       + SCENE_H;
-    const inRight = x >= SCENE_X_RIGHT && x <= SCENE_X_RIGHT + SCENE_W &&
-                    y >= SCENE_Y       && y <= SCENE_Y       + SCENE_H;
-    if (!inLeft && !inRight) return;
+    const inTop    = x >= DISPLAY_X     && x <= DISPLAY_X     + SCENE_W &&
+                     y >= DISPLAY_Y_TOP && y <= DISPLAY_Y_TOP + SCENE_H;
+    const inBottom = x >= DISPLAY_X     && x <= DISPLAY_X     + SCENE_W &&
+                     y >= DISPLAY_Y_BOT && y <= DISPLAY_Y_BOT + SCENE_H;
+    if (!inTop && !inBottom) return;
 
-    const sceneX = inLeft ? SCENE_X_LEFT : SCENE_X_RIGHT;
-    const relX = x - sceneX;
-    const relY = y - SCENE_Y;
+    const sceneY = inTop ? DISPLAY_Y_TOP : DISPLAY_Y_BOT;
+    const relX = x - DISPLAY_X;
+    const relY = y - sceneY;
 
     let hitIndex = -1;
     for (let i = 0; i < differences.length; i++) {
@@ -606,7 +642,7 @@ const spotTheDifference = {
 // ── Drawing helpers ──
 function drawSplash(ctx) {
   ctx.fillStyle = 'rgba(10,10,15,0.92)';
-  ctx.fillRect(0, 0, 1080, 1920);
+  ctx.fillRect(0, 0, 1920, 1080);
 
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -614,53 +650,52 @@ function drawSplash(ctx) {
   ctx.shadowColor = PALETTE.neonCyan;
   ctx.shadowBlur = 60;
   ctx.fillStyle = PALETTE.neonCyan;
-  ctx.font = 'bold 84px "Courier New", monospace';
-  ctx.fillText('PHOTO', 540, 580);
+  ctx.font = 'bold 96px "Courier New", monospace';
+  ctx.fillText('PHOTO', 960, 320);
   ctx.shadowColor = PALETTE.neonPink;
   ctx.shadowBlur = 60;
   ctx.fillStyle = PALETTE.neonPink;
-  ctx.fillText('HUNT', 540, 700);
+  ctx.fillText('HUNT', 960, 440);
   ctx.shadowBlur = 0;
 
   ctx.fillStyle = PALETTE.white;
   ctx.font = '36px "Courier New", monospace';
-  ctx.fillText(`Find ${TOTAL_DIFFERENCES} subtle differences`, 540, 850);
-  ctx.fillText(`in ${TIME_LIMIT} seconds`, 540, 900);
+  ctx.fillText(`Find ${TOTAL_DIFFERENCES} subtle differences in ${TIME_LIMIT} seconds`, 960, 540);
 
   ctx.fillStyle = PALETTE.dim;
   ctx.font = '28px "Courier New", monospace';
-  ctx.fillText('Wrong taps cost 5 seconds', 540, 970);
+  ctx.fillText('Wrong taps cost 5 seconds', 960, 600);
 
   const count = Math.ceil(splashTimer);
   ctx.fillStyle = PALETTE.neonAmber;
   ctx.font = 'bold 200px "Courier New", monospace';
-  ctx.fillText(count, 540, 1280);
+  ctx.fillText(count, 960, 800);
 
   ctx.fillStyle = PALETTE.dim;
-  ctx.font = '22px "Courier New", monospace';
-  ctx.fillText('Loading photos…', 540, 1500);
+  ctx.font = '24px "Courier New", monospace';
+  ctx.fillText('Loading photos…', 960, 1000);
 }
 
 function drawLoading(ctx, data) {
   ctx.fillStyle = 'rgba(10,10,15,0.85)';
-  ctx.fillRect(0, 0, 1080, 1920);
+  ctx.fillRect(0, 0, 1920, 1080);
 
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = PALETTE.white;
-  ctx.font = 'bold 48px "Courier New", monospace';
-  ctx.fillText('LOADING PHOTOS…', 540, 900);
+  ctx.font = 'bold 56px "Courier New", monospace';
+  ctx.fillText('LOADING PHOTOS…', 960, 500);
 
   if (loadError) {
     ctx.fillStyle = PALETTE.red;
-    ctx.font = '24px "Courier New", monospace';
-    ctx.fillText('Photos failed to load — ending round', 540, 980);
+    ctx.font = '28px "Courier New", monospace';
+    ctx.fillText('Photos failed to load — ending round', 960, 600);
   } else {
     const t = Date.now() / 200;
     ctx.strokeStyle = PALETTE.neonCyan;
-    ctx.lineWidth = 6;
+    ctx.lineWidth = 8;
     ctx.beginPath();
-    ctx.arc(540, 1100, 60, t, t + Math.PI * 1.4);
+    ctx.arc(960, 750, 80, t, t + Math.PI * 1.4);
     ctx.stroke();
   }
 }
@@ -719,11 +754,13 @@ registerGame(spotTheDifference);
 // tap them deterministically. Harmless in production (read-only).
 window.__photoHuntDebug = () => {
   if (!differences.length) return null;
+  // Positions are returned in display-coords (relative to top photo).
+  // Caller (test) must add DISPLAY_Y_TOP to y, or DISPLAY_Y_BOT to y for bottom.
   return differences.map(m => ({
     type: m.type,
     hint: m.hint,
-    x: Math.round(m.x + SCENE_X_RIGHT),
-    y: Math.round(m.y + SCENE_Y),
+    x: Math.round(m.x + DISPLAY_X),
+    y: Math.round(m.y + DISPLAY_Y_TOP),
     hitR: m.hitR,
     found: m.found,
   }));

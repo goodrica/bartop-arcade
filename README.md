@@ -15,7 +15,7 @@ A modern bartop arcade mini-game collection inspired by classics like Megatouch.
 2. Touch the screen to select a game
 3. Touch the differences you find — correct = points, wrong = time penalty
 
-**Optimized for portrait touchscreens (1080×1920 logical resolution).**
+**Optimized for 17" widescreen touchscreen monitor (1920×1080 logical resolution, landscape).** Photos are 1360×900 (1.51:1 aspect ratio).
 
 ## 🏗 Architecture
 
