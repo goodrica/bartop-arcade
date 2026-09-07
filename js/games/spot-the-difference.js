@@ -1,49 +1,33 @@
 /* ============================================
    Bartop Arcade - Photo Hunt (Spot the Difference)
    ============================================
-   Inspired by Megatouch's "Photo Hunt" (called
-   "PixMix" on later systems).
+   Inspired by Megatouch's "Photo Hunt".
+   Uses PRE-GENERATED photo pairs created by
+   scripts/photo_editor.py — real PIL-based
+   object-level edits (removals, color swaps,
+   synthetic objects, texture patches).
 
-   Two different photographs from the same
-   category are shown side-by-side. The right
-   photo has 5 subtle, photo-realistic
-   modifications applied to it. The user must
-   tap each difference.
-
-   Differences are natural-looking photo
-   effects (NOT overlaid shapes): brightness
-   patches, hue shifts, blurred regions, and
-   simulated "missing details." No borders,
-   no markers — the photo itself changes.
+   The modified photo is loaded as a separate
+   image file alongside its JSON diff manifest.
+   No runtime pixel manipulation needed.
    ============================================ */
 
 import { AudioManager } from '../audio.js';
 import { registerGame, getGameData, setGameData, pushScreen, getLevel, incrementLevel, resetLevel } from '../engine.js';
 import { PALETTE } from '../engine.js';
-import { loadPhotosByCategory, randomCategoryId, clearCache } from '../photo-loader.js';
 
 // ── Layout (logical canvas pixels, 1920x1080 landscape) ──
-// Two photos side-by-side. Each photo at 1.51:1 aspect (920×609).
-// HUD bar at top (~100px), photo area below.
-const DISPLAY_PHOTO_W = 920;       // pane width
-const DISPLAY_PHOTO_H = 609;       // pane height (920 / 1.51 ≈ 609)
-const PANE_GAP        = 16;        // gap between left and right panes
-const TOTAL_PANE_W    = DISPLAY_PHOTO_W * 2 + PANE_GAP;        // 1856
-const PANE_X_LEFT     = (1920 - TOTAL_PANE_W) / 2;              // = 32
-const PANE_X_RIGHT    = PANE_X_LEFT + DISPLAY_PHOTO_W + PANE_GAP; // = 968
-const PANE_Y          = 130;                                    // below HUD bar
+const DISPLAY_PHOTO_W = 920;
+const DISPLAY_PHOTO_H = 609;
+const PANE_GAP        = 16;
+const PANE_X_LEFT     = (1920 - (DISPLAY_PHOTO_W * 2 + PANE_GAP)) / 2;
+const PANE_X_RIGHT    = PANE_X_LEFT + DISPLAY_PHOTO_W + PANE_GAP;
+const PANE_Y          = 130;
 
-// Game-logic aliases (SCENE_W/H = pane size; SCENE_X depends on which pane was tapped).
 const SCENE_W = DISPLAY_PHOTO_W;
 const SCENE_H = DISPLAY_PHOTO_H;
 
-// Off-screen canvas kept at source resolution for sharp modifications.
-const SRC_W = 1360;
-const SRC_H = 900;
-
 // ── Difficulty scaling ──
-// Level 1 → 1.5× (50% easier), Level 2 → 1.4×, Level 3 → 1.3×, Level 4+ → 1.0×
-// "Easier" = bigger patches + stronger modifications + larger hit zones.
 function difficultyMultiplier(level) {
   const map = { 1: 1.5, 2: 1.4, 3: 1.3 };
   return map[level] || 1.0;
@@ -54,32 +38,21 @@ const TIME_LIMIT        = 60;
 const PENALTY_TIME      = 5;
 const SCORE_CORRECT     = 100;
 const SCORE_BONUS_MULT  = 2;
-const PHOTO_HIT_RADIUS  = 55;    // generous for touch
+const PHOTO_HIT_RADIUS  = 55;
 
-// ── Modification registry ──
-// Megatouch Photo Hunt-style changes — bold, findable, like real "find the
-// difference" puzzles. Each modification makes an obvious visible change to
-// the photo (a missing element, color swap, or contrast shift in a region).
-// Draws inside a circular hit zone — no subtle hue/brightness shifts that
-// blend into photo noise.
-const MOD_TYPES = [
-  { type: 'object_removed',  hint: 'Object removed' },
-  { type: 'color_swap',      hint: 'Color changed' },
-  { type: 'large_darken',    hint: 'Dark area' },
-  { type: 'large_brighten',  hint: 'Bright area' },
-  { type: 'contrast_invert', hint: 'Inverted patch' },
-  { type: 'red_tint',        hint: 'Red tint' },
-  { type: 'yellow_tint',     hint: 'Yellow tint' },
-  { type: 'blue_tint',       hint: 'Blue tint' },
+// ── Pre-generated photo pairs ──
+// Each entry maps a base photo filename to its modified version + diffs.
+// The editor script (scripts/photo_editor.py) produces {name}__modified.jpg
+// and {name}__mods.json.
+const PHOTO_PAIRS = [
+  { base: 'purchased__tennis-girls',   modified: 'purchased__tennis-girls__modified' },
+  { base: 'purchased__sierra-mountains', modified: 'purchased__sierra-mountains__modified' },
 ];
 
 // ── Per-round state ──
-let leftImg         = null;   // Reference photo (untouched)
-let rightImg        = null;   // Modified photo (with differences)
-let rightCanvas     = null;   // Off-screen canvas with the modified copy
-let rightCtx        = null;   // 2D context for rightCanvas
-let categoryId      = '';
-let differences     = [];     // [{x, y, r, found, hint, type}]
+let leftImg         = null;   // Reference photo (original)
+let rightImg        = null;   // Modified photo (pre-generated)
+let differences     = [];     // Loaded from mods JSON
 let foundParticles  = [];
 let wrongFlash      = 0;
 let warningFlash    = 0;
@@ -87,420 +60,66 @@ let splashTimer     = 2.0;
 let lastTickSecond  = -1;
 let loadError       = null;
 
-function rand(min, max) { return min + Math.random() * (max - min); }
+// ── Photo loading ──
 
-// ── Color utilities (RGB <-> HSL) ──
-function rgbToHsl(r, g, b) {
-  r /= 255; g /= 255; b /= 255;
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  let h, s, l = (max + min) / 2;
-  if (max === min) { h = s = 0; }
-  else {
-    const d = max - min;
-    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    switch (max) {
-      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
-      case g: h = (b - r) / d + 2; break;
-      default: h = (r - g) / d + 4;
-    }
-    h *= 60;
-  }
-  return [h, s, l];
+function loadImage(path) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`Failed to load ${path}`));
+    img.src = path;
+  });
 }
 
-function hslToRgb(h, s, l) {
-  h = ((h % 360) + 360) % 360;
-  const c = (1 - Math.abs(2 * l - 1)) * s;
-  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
-  const m = l - c / 2;
-  let r, g, b;
-  if (h < 60)       [r, g, b] = [c, x, 0];
-  else if (h < 120) [r, g, b] = [x, c, 0];
-  else if (h < 180) [r, g, b] = [0, c, x];
-  else if (h < 240) [r, g, b] = [0, x, c];
-  else if (h < 300) [r, g, b] = [x, 0, c];
-  else              [r, g, b] = [c, 0, x];
-  return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
-}
-
-// ── Photo modification operations ──
-// Each takes an ImageData region and modifies pixels.
-// Megatouch Photo Hunt-style modifications — bold edges, findable.
-// (Older versions used a smooth falloff; when the off-screen canvas is
-// downscaled to fit the pane, smooth falloff becomes invisible.)
-function maskFalloff(distance, maxR) {
-  // Hard-edged: 1 inside, 0 outside. No fade. Megatouch mod regions
-  // look like crisp rectangles/circles overlaid on the photo.
-  return distance <= maxR ? 1 : 0;
-}
-
-function applyBrighten(data, cx, cy, radius, strength) {
-  for (let py = -radius; py <= radius; py++) {
-    for (let px = -radius; px <= radius; px++) {
-      const dist = Math.sqrt(px * px + py * py);
-      if (dist > radius) continue;
-      const x = cx + px, y = cy + py;
-      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
-      const i = (y * data.width + x) * 4;
-      const m = maskFalloff(dist, radius) * strength;
-      data.data[i]     = Math.min(255, data.data[i]     + 255 * m);
-      data.data[i + 1] = Math.min(255, data.data[i + 1] + 255 * m);
-      data.data[i + 2] = Math.min(255, data.data[i + 2] + 255 * m);
-    }
-  }
-}
-
-function applyDarken(data, cx, cy, radius, strength) {
-  for (let py = -radius; py <= radius; py++) {
-    for (let px = -radius; px <= radius; px++) {
-      const dist = Math.sqrt(px * px + py * py);
-      if (dist > radius) continue;
-      const x = cx + px, y = cy + py;
-      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
-      const i = (y * data.width + x) * 4;
-      const m = maskFalloff(dist, radius) * strength;
-      data.data[i]     = Math.max(0, data.data[i]     - 255 * m);
-      data.data[i + 1] = Math.max(0, data.data[i + 1] - 255 * m);
-      data.data[i + 2] = Math.max(0, data.data[i + 2] - 255 * m);
-    }
-  }
-}
-
-function applySaturation(data, cx, cy, radius, factor) {
-  for (let py = -radius; py <= radius; py++) {
-    for (let px = -radius; px <= radius; px++) {
-      const dist = Math.sqrt(px * px + py * py);
-      if (dist > radius) continue;
-      const x = cx + px, y = cy + py;
-      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
-      const i = (y * data.width + x) * 4;
-      const m = maskFalloff(dist, radius);
-      const r = data.data[i], g = data.data[i + 1], b = data.data[i + 2];
-      const [h, s, l] = rgbToHsl(r, g, b);
-      const newS = Math.max(0, Math.min(1, s * (1 + (factor - 1) * m)));
-      const [nr, ng, nb] = hslToRgb(h, newS, l);
-      data.data[i] = nr;
-      data.data[i + 1] = ng;
-      data.data[i + 2] = nb;
-    }
-  }
-}
-
-function applyHueShift(data, cx, cy, radius, degrees) {
-  for (let py = -radius; py <= radius; py++) {
-    for (let px = -radius; px <= radius; px++) {
-      const dist = Math.sqrt(px * px + py * py);
-      if (dist > radius) continue;
-      const x = cx + px, y = cy + py;
-      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
-      const i = (y * data.width + x) * 4;
-      const m = maskFalloff(dist, radius);
-      const r = data.data[i], g = data.data[i + 1], b = data.data[i + 2];
-      const [h, s, l] = rgbToHsl(r, g, b);
-      const newH = (h + degrees * m + 360) % 360;
-      const [nr, ng, nb] = hslToRgb(newH, s, l);
-      data.data[i] = nr;
-      data.data[i + 1] = ng;
-      data.data[i + 2] = nb;
-    }
-  }
-}
-
-// Box blur with smooth circular mask. Works on a copy to
-// avoid feedback loops (read original pixels, write back).
-function applyBlur(data, cx, cy, radius, strength) {
-  const samples = [];
-  for (let py = -radius; py <= radius; py++) {
-    for (let px = -radius; px <= radius; px++) {
-      const dist = Math.sqrt(px * px + py * py);
-      if (dist > radius) continue;
-      const x = cx + px, y = cy + py;
-      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
-      let r = 0, g = 0, b = 0, count = 0;
-      for (let oy = -2; oy <= 2; oy++) {
-        for (let ox = -2; ox <= 2; ox++) {
-          const sx = x + ox, sy = y + oy;
-          if (sx < 0 || sx >= data.width || sy < 0 || sy >= data.height) continue;
-          const si = (sy * data.width + sx) * 4;
-          r += data.data[si];
-          g += data.data[si + 1];
-          b += data.data[si + 2];
-          count++;
-        }
-      }
-      samples.push({ i: (y * data.width + x) * 4, r: r / count, g: g / count, b: b / count, dist });
-    }
-  }
-  // Write back
-  for (const s of samples) {
-    const m = maskFalloff(s.dist, radius) * strength;
-    data.data[s.i]     = data.data[s.i]     * (1 - m) + s.r * m;
-    data.data[s.i + 1] = data.data[s.i + 1] * (1 - m) + s.g * m;
-    data.data[s.i + 2] = data.data[s.i + 2] * (1 - m) + s.b * m;
-  }
-}
-
-// Local contrast boost (lighten highlights, darken shadows)
-function applySharpen(data, cx, cy, radius, strength) {
-  for (let py = -radius; py <= radius; py++) {
-    for (let px = -radius; px <= radius; px++) {
-      const dist = Math.sqrt(px * px + py * py);
-      if (dist > radius) continue;
-      const x = cx + px, y = cy + py;
-      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
-      const i = (y * data.width + x) * 4;
-      const m = maskFalloff(dist, radius) * strength;
-      for (let c = 0; c < 3; c++) {
-        const v = data.data[i + c];
-        // Pull toward 128 (mid gray) by negative amount = push away = sharpen
-        data.data[i + c] = v + (v - 128) * m * 0.8;
-      }
-    }
-  }
-}
-
-// Megatouch Photo Hunt-style modifications. Each makes a BOLD, obvious
-// change in the hit region — findable without squinting.
-
-// "Object removed" — sample 12 border pixels and paint the whole region
-// with their average color (like the object was airbrushed out).
-function applyPaintOut(data, cx, cy, radius) {
-  // Sample average of pixels on a ring at the radius boundary
-  let rSum = 0, gSum = 0, bSum = 0, n = 0;
-  const ringRadius = Math.max(radius - 2, 1);
-  const steps = 32;
-  for (let i = 0; i < steps; i++) {
-    const angle = (i / steps) * Math.PI * 2;
-    const px = Math.round(cx + Math.cos(angle) * ringRadius);
-    const py = Math.round(cy + Math.sin(angle) * ringRadius);
-    if (px < 0 || px >= data.width || py < 0 || py >= data.height) continue;
-    const i2 = (py * data.width + px) * 4;
-    rSum += data.data[i2];
-    gSum += data.data[i2 + 1];
-    bSum += data.data[i2 + 2];
-    n++;
-  }
-  const r = n > 0 ? rSum / n : 128;
-  const g = n > 0 ? gSum / n : 128;
-  const b = n > 0 ? bSum / n : 128;
-  // Paint the whole region with that average color
-  for (let py = -radius; py <= radius; py++) {
-    for (let px = -radius; px <= radius; px++) {
-      const dist = Math.sqrt(px * px + py * py);
-      if (dist > radius) continue;
-      const x = cx + px, y = cy + py;
-      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
-      const i = (y * data.width + x) * 4;
-      const m = maskFalloff(dist, radius);
-      data.data[i]     = data.data[i]     * (1 - m) + r * m;
-      data.data[i + 1] = data.data[i + 1] * (1 - m) + g * m;
-      data.data[i + 2] = data.data[i + 2] * (1 - m) + b * m;
-    }
-  }
-}
-
-// "Color swap" — replace each pixel with its complementary hue.
-function applyColorSwap(data, cx, cy, radius) {
-  for (let py = -radius; py <= radius; py++) {
-    for (let px = -radius; px <= radius; px++) {
-      const dist = Math.sqrt(px * px + py * py);
-      if (dist > radius) continue;
-      const x = cx + px, y = cy + py;
-      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
-      const i = (y * data.width + x) * 4;
-      const m = maskFalloff(dist, radius);
-      const r = data.data[i], g = data.data[i + 1], b = data.data[i + 2];
-      // Complement: 255 - rgb
-      const cr = 255 - r, cg = 255 - g, cb = 255 - b;
-      data.data[i]     = r * (1 - m) + cr * m;
-      data.data[i + 1] = g * (1 - m) + cg * m;
-      data.data[i + 2] = b * (1 - m) + cb * m;
-    }
-  }
-}
-
-// Full RGB invert within the region.
-function applyInvert(data, cx, cy, radius) {
-  for (let py = -radius; py <= radius; py++) {
-    for (let px = -radius; px <= radius; px++) {
-      const dist = Math.sqrt(px * px + py * py);
-      if (dist > radius) continue;
-      const x = cx + px, y = cy + py;
-      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
-      const i = (y * data.width + x) * 4;
-      const m = maskFalloff(dist, radius);
-      data.data[i]     = data.data[i]     * (1 - m) + (255 - data.data[i])     * m;
-      data.data[i + 1] = data.data[i + 1] * (1 - m) + (255 - data.data[i + 1]) * m;
-      data.data[i + 2] = data.data[i + 2] * (1 - m) + (255 - data.data[i + 2]) * m;
-    }
-  }
-}
-
-// Color overlay (red/yellow/blue tint). Mixes toward target color.
-function applyColorOverlay(data, cx, cy, radius, color, strength) {
-  const [tr, tg, tb] = color;
-  for (let py = -radius; py <= radius; py++) {
-    for (let px = -radius; px <= radius; px++) {
-      const dist = Math.sqrt(px * px + py * py);
-      if (dist > radius) continue;
-      const x = cx + px, y = cy + py;
-      if (x < 0 || x >= data.width || y < 0 || y >= data.height) continue;
-      const i = (y * data.width + x) * 4;
-      const m = maskFalloff(dist, radius) * strength;
-      data.data[i]     = data.data[i]     * (1 - m) + tr * m;
-      data.data[i + 1] = data.data[i + 1] * (1 - m) + tg * m;
-      data.data[i + 2] = data.data[i + 2] * (1 - m) + tb * m;
-    }
-  }
-}
-
-// ── Photo loading + modification ──
-// The real Megatouch Photo Hunt model: load ONE photo, draw it identically
-// on both sides, then apply 5 very subtle, SMALL pixel-level modifications
-// to the right copy. The changes should look like natural photo details
-// — one petal slightly different, one small spot of shade, etc.
 async function generateRound() {
-  // Pin to the user's purchased photo category so they can preview their
-  // own photos with the new Megatouch-style mods. (Random category picking
-  // is still available via the regular game flow once they confirm the
-  // look-and-feel.)
-  categoryId = 'purchased';
-
-  // Load ONE photo (used on both sides — they're identical except for mods)
-  const imgs = await loadPhotosByCategory(categoryId, 1);
-  if (!imgs[0]) {
-    loadError = new Error(`Failed to load photo from category: ${categoryId}`);
-    return false;
-  }
-
-  leftImg = imgs[0];
-  rightImg = imgs[0];   // SAME photo — modifications applied via off-screen canvas
   loadError = null;
 
-  // Off-screen canvas at SOURCE resolution (sharp modifications)
-  if (!rightCanvas) {
-    rightCanvas = document.createElement('canvas');
-  }
-  rightCanvas.width = SRC_W;
-  rightCanvas.height = SRC_H;
-  rightCtx = rightCanvas.getContext('2d', { willReadFrequently: true });
-  drawPhotoCover(rightCtx, rightImg, 0, 0, SRC_W, SRC_H);
+  // Pick a pair
+  const pair = PHOTO_PAIRS[Math.floor(Math.random() * PHOTO_PAIRS.length)];
+  const basePath = `assets/photos/${pair.base}.jpg`;
+  const modPath  = `assets/photos/${pair.modified}.jpg`;
+  const jsonPath = `assets/photos/${pair.base}__mods.json`;
 
-  // Pick 5 unique modification types
-  const pool = [...MOD_TYPES];
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [pool[i], pool[j]] = [pool[j], pool[i]];
-  }
-  const chosen = pool.slice(0, TOTAL_DIFFERENCES);
+  try {
+    // Load both images + the diff manifest in parallel
+    const [left, right, modsData] = await Promise.all([
+      loadImage(basePath),
+      loadImage(modPath),
+      fetch(jsonPath).then(r => {
+        if (!r.ok) throw new Error('JSON not found');
+        return r.json();
+      }),
+    ]);
 
-  // Place each modification at a SMALL random point on the photo,
-  // stored in DISPLAY coords (what the user sees and taps).
-  // When we apply it to the source canvas, we scale up by SRC/display ratio.
-  // Difficulty scales patch radius + hit zone (lower levels = bigger/easier).
-  const diff = difficultyMultiplier(getLevel());
-  const margin = 50;
-  differences = chosen.map((mod, i) => {
-    return {
-      key: `${mod.type}-${i}-${Date.now()}`,
-      type: mod.type,
-      hint: mod.hint,
-      // Display coords — used for tap hit-testing
-      x: rand(margin, SCENE_W - margin),
-      y: rand(margin, SCENE_H - margin),
-      // Visual radius scaled to display; will be scaled up for source canvas.
-      // Megatouch Photo Hunt patches are findable (button-sized, not pixel-sized).
-      // At level 1 (diff=1.5): r ≈ 38-65 display-px (large enough to spot at a glance)
-      // At level 4+ (diff=1.0): r ≈ 25-43 display-px
-      r: rand(25, 43) * diff,
-      // Hit zone: generous even at base level, scaled up for early levels.
-      hitR: Math.round(PHOTO_HIT_RADIUS * diff),
-      // Stashed multiplier for applyModification to scale strength.
-      diffMult: diff,
+    leftImg = left;
+    rightImg = right;
+
+    // Scale source coords (1360×900) to display coords (920×609)
+    const sx = SCENE_W / 1360;
+    const sy = SCENE_H / 900;
+
+    // Apply difficulty scaling to hit zones
+    const diff = difficultyMultiplier(getLevel());
+
+    differences = modsData.map((m, i) => ({
+      key: `${m.type}-${i}`,
+      type: m.type,
+      hint: m.hint,
+      x: Math.round(m.x * sx),
+      y: Math.round(m.y * sy),
+      hitR: Math.round((m.hitR || 50) * sx * diff),
       found: false,
-    };
-  });
-
-  // Apply each modification to the off-screen canvas
-  for (const mod of differences) {
-    applyModification(mod);
+    }));
+  } catch (e) {
+    loadError = e;
+    console.error('[Photo Hunt]', e.message);
+    return false;
   }
 
   return true;
 }
 
-// Apply a single modification to the right canvas
-// Strengths are deliberately SUBTLE — the differences should look like
-// natural photo details (a petal slightly different, one leaf darker)
-// not obvious color shifts. Megatouch Photo Hunt's whole challenge is
-// that the changes are tiny.
-//
-// The diff is stored in DISPLAY coords; we scale up to SOURCE coords when
-// drawing on the off-screen canvas (which is at source resolution).
-function applyModification(mod) {
-  const scaleX = SRC_W / SCENE_W;
-  const scaleY = SRC_H / SCENE_H;
-
-  const srcX = mod.x * scaleX;
-  const srcY = mod.y * scaleY;
-  const srcR = mod.r * scaleX;
-
-  const r = Math.ceil(srcR);
-  const x0 = Math.max(0, Math.floor(srcX - r));
-  const y0 = Math.max(0, Math.floor(srcY - r));
-  const w  = Math.min(SRC_W - x0, r * 2);
-  const h  = Math.min(SRC_H - y0, r * 2);
-
-  if (w <= 0 || h <= 0) return;
-
-  const imgData = rightCtx.getImageData(x0, y0, w, h);
-  const cx = srcX - x0;
-  const cy = srcY - y0;
-
-  // Difficulty multiplier scales modification strength (lower level = stronger).
-  const diff = mod.diffMult || 1.0;
-
-  // Effective radius: bigger at easier levels, but always findable.
-  // At level 1 (diff=1.5): r = 35 src-px → ~24 display-px
-  // At level 4+ (diff=1.0): r = 25 src-px → ~17 display-px
-  const effR = Math.max(r, Math.ceil(srcR * diff));
-
-  switch (mod.type) {
-    case 'object_removed':
-      // Replace the region with the average color of its border (paint-out effect)
-      applyPaintOut(imgData, cx, cy, effR);
-      break;
-    case 'color_swap':
-      // Swap the dominant hue to its complement (e.g. red→cyan, blue→orange)
-      applyColorSwap(imgData, cx, cy, effR);
-      break;
-    case 'large_darken':
-      applyDarken(imgData, cx, cy, effR, 0.7);
-      break;
-    case 'large_brighten':
-      applyBrighten(imgData, cx, cy, effR, 0.7);
-      break;
-    case 'contrast_invert':
-      // Full RGB inversion in the region
-      applyInvert(imgData, cx, cy, effR);
-      break;
-    case 'red_tint':
-      applyColorOverlay(imgData, cx, cy, effR, [255, 60, 60], 0.55);
-      break;
-    case 'yellow_tint':
-      applyColorOverlay(imgData, cx, cy, effR, [255, 220, 60], 0.55);
-      break;
-    case 'blue_tint':
-      applyColorOverlay(imgData, cx, cy, effR, [60, 120, 255], 0.55);
-      break;
-  }
-
-  rightCtx.putImageData(imgData, x0, y0);
-}
-
 // ── Photo drawing (object-fit: cover — crop to fill, no stretch) ──
-// Draws to (dstX, dstY) so the photo aligns with its clip-path pane.
-// The off-screen right canvas uses (0, 0); the left pane uses (40, 160).
 function drawPhotoCover(ctx, img, dstX, dstY, dstW, dstH) {
   if (!img || !img.complete || img.naturalWidth === 0) {
     const grad = ctx.createLinearGradient(dstX, dstY, dstX, dstY + dstH);
@@ -521,6 +140,136 @@ function drawPhotoCover(ctx, img, dstX, dstY, dstW, dstH) {
     sy = (img.naturalHeight - sh) / 2;
   }
   ctx.drawImage(img, sx, sy, sw, sh, dstX, dstY, dstW, dstH);
+}
+
+// ── Drawing helpers ──
+
+function drawPhotoFrame(ctx, x, y, w, h) {
+  ctx.save();
+  ctx.shadowColor = PALETTE.neonCyan;
+  ctx.shadowBlur = 18;
+  ctx.strokeStyle = 'rgba(0, 240, 255, 0.4)';
+  ctx.lineWidth = 2;
+  roundRectPath(ctx, x, y, w, h, 12);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function roundRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function drawFoundHighlight(ctx, mod, sceneX, sceneY) {
+  const cx = sceneX + mod.x;
+  const cy = sceneY + mod.y;
+  const r = mod.hitR * 0.8;
+
+  ctx.save();
+  ctx.globalAlpha = 0.7;
+
+  ctx.strokeStyle = PALETTE.neonGreen;
+  ctx.lineWidth = 4;
+  ctx.shadowColor = PALETTE.neonGreen;
+  ctx.shadowBlur = 16;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Check mark
+  ctx.strokeStyle = PALETTE.neonGreen;
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(cx - r * 0.4, cy);
+  ctx.lineTo(cx - r * 0.05, cy + r * 0.35);
+  ctx.lineTo(cx + r * 0.45, cy - r * 0.35);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawSplash(ctx) {
+  ctx.fillStyle = 'rgba(10,10,15,0.92)';
+  ctx.fillRect(0, 0, 1920, 1080);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  const level = getLevel();
+  ctx.fillStyle = PALETTE.dim;
+  ctx.font = 'bold 28px "Courier New", monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(`LEVEL ${level}`, 40, 50);
+  ctx.textAlign = 'center';
+
+  ctx.shadowColor = PALETTE.neonCyan;
+  ctx.shadowBlur = 60;
+  ctx.fillStyle = PALETTE.neonCyan;
+  ctx.font = 'bold 96px "Courier New", monospace';
+  ctx.fillText('PHOTO', 960, 320);
+  ctx.shadowColor = PALETTE.neonPink;
+  ctx.shadowBlur = 60;
+  ctx.fillStyle = PALETTE.neonPink;
+  ctx.fillText('HUNT', 960, 440);
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = PALETTE.white;
+  ctx.font = '36px "Courier New", monospace';
+  ctx.fillText(`Find ${TOTAL_DIFFERENCES} subtle differences in ${TIME_LIMIT} seconds`, 960, 540);
+
+  ctx.fillStyle = PALETTE.dim;
+  ctx.font = '28px "Courier New", monospace';
+  ctx.fillText('Wrong taps cost 5 seconds', 960, 600);
+
+  if (level <= 3) {
+    const bonusMap = { 1: 50, 2: 40, 3: 30 };
+    ctx.fillStyle = PALETTE.neonGreen;
+    ctx.font = 'bold 28px "Courier New", monospace';
+    ctx.fillText(`LEVEL ${level}: ${bonusMap[level]}% EASIER`, 960, 660);
+  }
+
+  const count = Math.ceil(splashTimer);
+  ctx.fillStyle = PALETTE.neonAmber;
+  ctx.font = 'bold 200px "Courier New", monospace';
+  ctx.fillText(count, 960, 800);
+
+  ctx.fillStyle = PALETTE.dim;
+  ctx.font = '24px "Courier New", monospace';
+  ctx.fillText('Loading photos…', 960, 1000);
+}
+
+function drawLoading(ctx, data) {
+  ctx.fillStyle = 'rgba(10,10,15,0.85)';
+  ctx.fillRect(0, 0, 1920, 1080);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = PALETTE.white;
+  ctx.font = 'bold 56px "Courier New", monospace';
+  ctx.fillText('LOADING PHOTOS…', 960, 500);
+
+  if (loadError) {
+    ctx.fillStyle = PALETTE.red;
+    ctx.font = '28px "Courier New", monospace';
+    ctx.fillText('Photos failed to load — ending round', 960, 600);
+  } else {
+    const t = Date.now() / 200;
+    ctx.strokeStyle = PALETTE.neonCyan;
+    ctx.lineWidth = 8;
+    ctx.beginPath();
+    ctx.arc(960, 750, 80, t, t + Math.PI * 1.4);
+    ctx.stroke();
+  }
 }
 
 // ── Game module ──
@@ -551,7 +300,6 @@ const spotTheDifference = {
       loading: true,
     });
 
-    // Kick off async round generation (doesn't block splash)
     generateRound().then(ok => {
       const data = getGameData();
       data.loading = false;
@@ -606,48 +354,38 @@ const spotTheDifference = {
   draw(ctx) {
     const data = getGameData();
 
-    // Dark background
     ctx.fillStyle = '#0a0a0f';
     ctx.fillRect(0, 0, 1920, 1080);
 
     if (splashTimer > 0) { drawSplash(ctx); return; }
     if (data.loading || !leftImg || !rightImg) { drawLoading(ctx, data); return; }
 
-    // Photo borders (left=reference, right=modified)
+    // Photo borders
     drawPhotoFrame(ctx, PANE_X_LEFT, PANE_Y, SCENE_W, SCENE_H);
     drawPhotoFrame(ctx, PANE_X_RIGHT, PANE_Y, SCENE_W, SCENE_H);
 
-    // LEFT photo — clean reference
+    // LEFT — original reference
     ctx.save();
     roundRectPath(ctx, PANE_X_LEFT, PANE_Y, SCENE_W, SCENE_H, 12);
     ctx.clip();
     drawPhotoCover(ctx, leftImg, PANE_X_LEFT, PANE_Y, SCENE_W, SCENE_H);
     ctx.restore();
 
-    // RIGHT photo — modified copy from off-screen canvas.
-    // Use imageSmoothingEnabled = false so modifications stay crisp
-    // (without this, scaling averages mod pixels with neighbors and
-    // makes the effect invisible).
+    // RIGHT — pre-generated modified photo (loaded as a regular image)
     ctx.save();
-    ctx.imageSmoothingEnabled = false;
     roundRectPath(ctx, PANE_X_RIGHT, PANE_Y, SCENE_W, SCENE_H, 12);
     ctx.clip();
-    if (rightCanvas) {
-      ctx.drawImage(rightCanvas, PANE_X_RIGHT, PANE_Y, SCENE_W, SCENE_H);
-    } else {
-      drawPhotoCover(ctx, rightImg, PANE_X_RIGHT, PANE_Y, SCENE_W, SCENE_H);
-    }
-    ctx.imageSmoothingEnabled = true;
+    drawPhotoCover(ctx, rightImg, PANE_X_RIGHT, PANE_Y, SCENE_W, SCENE_H);
     ctx.restore();
 
-    // Labels above each pane
+    // Labels
     ctx.textAlign = 'center';
     ctx.font = 'bold 22px "Courier New", monospace';
     ctx.fillStyle = PALETTE.dim;
     ctx.fillText('REFERENCE', PANE_X_LEFT + SCENE_W / 2, PANE_Y - 12);
     ctx.fillText('FIND CHANGES', PANE_X_RIGHT + SCENE_W / 2, PANE_Y - 12);
 
-    // Found-difference highlights (green circle + check on both panes)
+    // Found-difference highlights
     for (const mod of differences) {
       if (!mod.found) continue;
       drawFoundHighlight(ctx, mod, PANE_X_LEFT, PANE_Y);
@@ -665,13 +403,11 @@ const spotTheDifference = {
     }
     ctx.globalAlpha = 1;
 
-    // Wrong-tap red flash
     if (wrongFlash > 0) {
       ctx.fillStyle = `rgba(255, 51, 85, ${wrongFlash * 0.5})`;
       ctx.fillRect(0, 0, 1920, 1080);
     }
 
-    // Low-time warning
     if (data.timeRemaining <= 10 && warningFlash > 0) {
       const a = Math.sin(Date.now() / 150) * 0.12 + 0.12;
       ctx.fillStyle = `rgba(255, 51, 85, ${a})`;
@@ -684,7 +420,6 @@ const spotTheDifference = {
     if (data.gameOver || splashTimer > 0 || data.loading) return;
     if (differences.length === 0) return;
 
-    // Tap must be inside one of the photo panes (left or right)
     const inLeft  = x >= PANE_X_LEFT  && x <= PANE_X_LEFT  + SCENE_W &&
                      y >= PANE_Y      && y <= PANE_Y      + SCENE_H;
     const inRight = x >= PANE_X_RIGHT && x <= PANE_X_RIGHT + SCENE_W &&
@@ -753,8 +488,6 @@ const spotTheDifference = {
   cleanup() {
     leftImg = null;
     rightImg = null;
-    rightCanvas = null;
-    rightCtx = null;
     differences = [];
     foundParticles = [];
     wrongFlash = 0;
@@ -762,139 +495,9 @@ const spotTheDifference = {
   },
 };
 
-// ── Drawing helpers ──
-function drawSplash(ctx) {
-  ctx.fillStyle = 'rgba(10,10,15,0.92)';
-  ctx.fillRect(0, 0, 1920, 1080);
-
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-
-  // Level badge in upper-left corner
-  const level = getLevel();
-  ctx.fillStyle = PALETTE.dim;
-  ctx.font = 'bold 28px "Courier New", monospace';
-  ctx.textAlign = 'left';
-  ctx.fillText(`LEVEL ${level}`, 40, 50);
-  ctx.textAlign = 'center';
-
-  ctx.shadowColor = PALETTE.neonCyan;
-  ctx.shadowBlur = 60;
-  ctx.fillStyle = PALETTE.neonCyan;
-  ctx.font = 'bold 96px "Courier New", monospace';
-  ctx.fillText('PHOTO', 960, 320);
-  ctx.shadowColor = PALETTE.neonPink;
-  ctx.shadowBlur = 60;
-  ctx.fillStyle = PALETTE.neonPink;
-  ctx.fillText('HUNT', 960, 440);
-  ctx.shadowBlur = 0;
-
-  ctx.fillStyle = PALETTE.white;
-  ctx.font = '36px "Courier New", monospace';
-  ctx.fillText(`Find ${TOTAL_DIFFERENCES} subtle differences in ${TIME_LIMIT} seconds`, 960, 540);
-
-  ctx.fillStyle = PALETTE.dim;
-  ctx.font = '28px "Courier New", monospace';
-  ctx.fillText('Wrong taps cost 5 seconds', 960, 600);
-
-  // Difficulty hint for early levels (level 1 = 50% easier, etc.)
-  if (level <= 3) {
-    const bonusMap = { 1: 50, 2: 40, 3: 30 };
-    ctx.fillStyle = PALETTE.neonGreen;
-    ctx.font = 'bold 28px "Courier New", monospace';
-    ctx.fillText(`LEVEL ${level}: ${bonusMap[level]}% EASIER`, 960, 660);
-  }
-
-  const count = Math.ceil(splashTimer);
-  ctx.fillStyle = PALETTE.neonAmber;
-  ctx.font = 'bold 200px "Courier New", monospace';
-  ctx.fillText(count, 960, 800);
-
-  ctx.fillStyle = PALETTE.dim;
-  ctx.font = '24px "Courier New", monospace';
-  ctx.fillText('Loading photos…', 960, 1000);
-}
-
-function drawLoading(ctx, data) {
-  ctx.fillStyle = 'rgba(10,10,15,0.85)';
-  ctx.fillRect(0, 0, 1920, 1080);
-
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = PALETTE.white;
-  ctx.font = 'bold 56px "Courier New", monospace';
-  ctx.fillText('LOADING PHOTOS…', 960, 500);
-
-  if (loadError) {
-    ctx.fillStyle = PALETTE.red;
-    ctx.font = '28px "Courier New", monospace';
-    ctx.fillText('Photos failed to load — ending round', 960, 600);
-  } else {
-    const t = Date.now() / 200;
-    ctx.strokeStyle = PALETTE.neonCyan;
-    ctx.lineWidth = 8;
-    ctx.beginPath();
-    ctx.arc(960, 750, 80, t, t + Math.PI * 1.4);
-    ctx.stroke();
-  }
-}
-
-function drawPhotoFrame(ctx, x, y, w, h) {
-  ctx.save();
-  ctx.shadowColor = PALETTE.neonCyan;
-  ctx.shadowBlur = 18;
-  ctx.strokeStyle = 'rgba(0, 240, 255, 0.4)';
-  ctx.lineWidth = 2;
-  roundRectPath(ctx, x, y, w, h, 12);
-  ctx.stroke();
-  ctx.restore();
-}
-
-function roundRectPath(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-  ctx.lineTo(x + r, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-  ctx.lineTo(x, y + r);
-  ctx.quadraticCurveTo(x, y, x + r, y);
-  ctx.closePath();
-}
-
-function drawFoundHighlight(ctx, mod, ox, oy) {
-  const cx = ox + mod.x;
-  const cy = oy + mod.y;
-  ctx.strokeStyle = PALETTE.neonGreen;
-  ctx.lineWidth = 4;
-  ctx.shadowColor = PALETTE.neonGreen;
-  ctx.shadowBlur = 18;
-  ctx.beginPath();
-  ctx.arc(cx, cy, 30, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.shadowBlur = 0;
-
-  ctx.lineWidth = 5;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.moveTo(cx - 14, cy);
-  ctx.lineTo(cx - 4, cy + 10);
-  ctx.lineTo(cx + 16, cy - 12);
-  ctx.stroke();
-}
-
-// Register with engine
-registerGame(spotTheDifference);
-
-// ── Debug hook for testing ──
-// Exposes the current round's difference positions so CDP tests can
-// tap them deterministically. Harmless in production (read-only).
+// ── Debug hook ──
 window.__photoHuntDebug = () => {
   if (!differences.length) return null;
-  // Positions are returned in canvas coords (relative to the right pane).
-  // Caller can also derive left-pane coords by swapping sceneX if needed.
   return differences.map(m => ({
     type: m.type,
     hint: m.hint,
@@ -902,8 +505,8 @@ window.__photoHuntDebug = () => {
     y: Math.round(m.y + PANE_Y),
     hitR: m.hitR,
     found: m.found,
-    diffMult: m.diffMult,
   }));
 };
 
+registerGame(spotTheDifference);
 export default spotTheDifference;
