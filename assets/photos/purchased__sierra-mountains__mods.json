@@ -1,37 +1,37 @@
 [
   {
+    "type": "color_changed",
+    "hint": "An existing object changed color",
+    "x": 904,
+    "y": 366,
+    "hitR": 41
+  },
+  {
     "type": "object_removed",
-    "hint": "Something is missing",
-    "x": 100,
-    "y": 135,
-    "hitR": 28
+    "hint": "A small object is missing",
+    "x": 403,
+    "y": 830,
+    "hitR": 34
+  },
+  {
+    "type": "background_removed",
+    "hint": "A background element is missing",
+    "x": 105,
+    "y": 304,
+    "hitR": 38
+  },
+  {
+    "type": "size_changed",
+    "hint": "An existing object changed size",
+    "x": 568,
+    "y": 565,
+    "hitR": 38
   },
   {
     "type": "color_changed",
-    "hint": "Object color changed",
-    "x": 823,
-    "y": 164,
-    "hitR": 37
-  },
-  {
-    "type": "object_removed",
-    "hint": "Background element removed",
-    "x": 949,
-    "y": 427,
-    "hitR": 31
-  },
-  {
-    "type": "brightness_changed",
-    "hint": "Area brighter/darker",
-    "x": 850,
-    "y": 424,
-    "hitR": 36
-  },
-  {
-    "type": "contrast_changed",
-    "hint": "Area contrast changed",
-    "x": 1040,
-    "y": 129,
-    "hitR": 26
+    "hint": "Another object changed color",
+    "x": 867,
+    "y": 185,
+    "hitR": 34
   }
 ]

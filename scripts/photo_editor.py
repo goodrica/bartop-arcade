@@ -1,227 +1,132 @@
 #!/usr/bin/env python3
+"""Create subtle, Photo-Hunt-style modifications.
+
+This editor deliberately does NOT add bright synthetic shapes. It only makes
+changes that could plausibly be differences between two photos:
+- recolor an existing local object/region
+- remove an existing object by cloning nearby background
+- remove a background element by cloning nearby background
+- slightly resize an existing local region
+
+The generated JSON manifest stores source-image coordinates for hit testing.
 """
-PIL-based photo editor for subtle but findable Spot the Difference edits.
-Edits are realistic: object removal, color change of existing objects,
-background removal, brightness/contrast adjustments.
-All edits are made to be visible (ΔE > 30) by default.
-"""
 
-import sys, json, random
-from PIL import Image, ImageDraw, ImageFilter, ImageEnhance, ImageStat
+import json
+import random
+import sys
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageStat
 
-def find_editable_region(img, min_size=60, max_tries=50, require_variance=True):
-    """Find a region to edit.
-    If require_variance is True, ensures the region has enough texture/color variance.
-    Returns (cx, cy, size) where size is the radius of a circular region."""
+
+def find_region(img, radius_min=30, radius_max=55, min_variance=18, tries=300):
+    """Find a textured region; avoid flat sky/wall areas where edits vanish."""
     w, h = img.size
-    for _ in range(max_tries):
-        cx = random.randint(min_size, w - min_size)
-        cy = random.randint(min_size, h - min_size)
-        size = random.randint(30, 50)
-        left = max(cx - size, 0)
-        top = max(cy - size, 0)
-        right = min(cx + size, w)
-        bottom = min(cy + size, h)
-        region = img.crop((left, top, right, bottom))
-        if require_variance:
-            stat = ImageStat.Stat(region)
-            variance = sum(stat.stddev)
-            if variance < 12:  # need some variance to see an edit
-                continue
-        return cx, cy, size
-    # fallback: center
-    return w//2, h//2, 40
+    for _ in range(tries):
+        r = random.randint(radius_min, radius_max)
+        cx = random.randint(r + 5, w - r - 5)
+        cy = random.randint(r + 5, h - r - 5)
+        box = (cx - r, cy - r, cx + r, cy + r)
+        stat = ImageStat.Stat(img.crop(box))
+        if sum(stat.stddev) >= min_variance:
+            return cx, cy, r
+    return w // 2, h // 2, (radius_min + radius_max) // 2
 
-def apply_circular_mask(img, mask_fn, cx, cy, radius, feather=0.2):
-    """Apply a function that modifies an image within a circular region.
-    mask_fn receives a PIL Image (the region) and returns modified region.
-    feather: proportion of radius for edge blur (0 = hard edge, 0.2 = soft)."""
-    w, h = img.size
-    # Create mask
-    mask = Image.new('L', (w, h), 0)
+
+def soft_circle_mask(size, feather):
+    mask = Image.new("L", (size, size), 0)
     draw = ImageDraw.Draw(mask)
-    # Soft edge: draw concentric ellipses with decreasing alpha
-    steps = int(radius * feather)
-    for i in range(steps):
-        alpha = int(255 * (1 - i/steps))
-        bbox = [cx - radius + i, cy - radius + i, cx + radius - i, cy + radius - i]
-        draw.ellipse(bbox, fill=alpha)
-    # Fill center
-    draw.ellipse([cx - radius + steps, cy - radius + steps,
-                  cx + radius - steps, cy + radius - steps], fill=255)
-    # Blur mask slightly for smoother transition
-    if feather > 0:
-        mask = mask.filter(ImageFilter.GaussianBlur(radius=feather*radius*0.5))
-    # Extract region
-    left = max(cx - radius, 0)
-    top = max(cy - radius, 0)
-    right = min(cx + radius, w)
-    bottom = min(cy + radius, h)
-    region = img.crop((left, top, right, bottom))
-    mask_region = mask.crop((left, top, right, bottom))
-    # Apply fn to region
-    modified = mask_fn(region)
-    # Blend
-    if modified.mode != 'RGBA':
-        modified = modified.convert('RGBA')
-    region_rgba = region.convert('RGBA')
-    blended = Image.composite(modified, region_rgba, mask_region)
-    # Paste back
-    img.paste(blended.convert(img.mode), (left, top))
-    return img
+    draw.ellipse((0, 0, size - 1, size - 1), fill=255)
+    if feather:
+        mask = mask.filter(ImageFilter.GaussianBlur(feather))
+    return mask
 
-def edit_remove_object(img):
-    """Remove an object by cloning from surrounding area (healing brush style)."""
-    cx, cy, radius = find_editable_region(img, min_size=50, require_variance=True)
-    # Choose a source offset: sample from a similar texture area nearby
-    angle = random.uniform(0, 2*3.14159)
-    dist = random.uniform(radius*1.2, radius*2.5)
-    sx = int(cx + dist * random.choice([-1, 1]))
-    sy = int(cy + dist * random.choice([-1, 1]))
-    # Clamp source to image bounds
-    sx = max(radius, min(sx, img.width - radius))
-    sy = max(radius, min(sy, img.height - radius))
-    # Copy a circular patch from source
-    patch = img.crop((sx - radius, sy - radius, sx + radius, sy + radius))
-    # Optional: blur patch slightly to blend
-    patch = patch.filter(ImageFilter.GaussianBlur(radius=1))
-    # Apply patch to target with soft mask
-    def patch_fn(region):
-        return patch.copy()
-    img = apply_circular_mask(img, patch_fn, cx, cy, radius, feather=0.25)
-    return {
-        'type': 'object_removed',
-        'hint': 'Something is missing',
-        'x': cx, 'y': cy,
-        'hitR': int(radius * 0.8)  # hit zone slightly smaller than edit
-    }
 
-def edit_change_object_color(img):
-    """Change the hue of an object (e.g., shirt) by shifting HSV hue."""
-    cx, cy, radius = find_editable_region(img, min_size=50, require_variance=True)
-    # Convert region to HSV, shift hue, convert back
-    def hue_shift_fn(region):
-        if region.mode != 'RGB':
-            region = region.convert('RGB')
-        # Convert to HSV
-        hsv = region.convert('HSV')
-        h, s, v = hsv.split()
-        # Shift hue by adding/subtracting a value (0-255 range)
-        shift = random.choice([-40, -30, 30, 40])  # stronger shift
-        # Convert hue band to array, shift, wrap
-        h_array = list(h.getdata())
-        h_array = [(v + shift) % 256 for v in h_array]
-        h = Image.new('L', h.size)
-        h.putdata(h_array)
-        hsv = Image.merge('HSV', (h, s, v))
-        rgb = hsv.convert('RGB')
-        return rgb
-    img = apply_circular_mask(img, hue_shift_fn, cx, cy, radius, feather=0.2)
-    return {
-        'type': 'color_changed',
-        'hint': 'Object color changed',
-        'x': cx, 'y': cy,
-        'hitR': int(radius * 0.8)
-    }
+def paste_patch(img, source_box, target_xy, radius, feather=5):
+    patch = img.crop(source_box).filter(ImageFilter.GaussianBlur(1.0))
+    mask = soft_circle_mask(patch.width, feather)
+    img.paste(patch, target_xy, mask)
 
-def edit_remove_background(img):
-    """Remove a background element (like a cloud, tree) by cloning from similar background."""
-    # Similar to remove_object but maybe larger radius and from more distant background
-    cx, cy, radius = find_editable_region(img, min_size=80, require_variance=True)
-    # Increase radius for bigger objects
-    radius = int(radius * 1.2)
-    # Source: pick from a faraway area of similar texture (e.g., opposite side)
+
+def remove_with_nearby_clone(img, cx, cy, radius, offset_x, offset_y):
     w, h = img.size
-    sx = random.randint(radius, w - radius)
-    sy = random.randint(radius, h - radius)
-    # Ensure source and target are not overlapping
-    while abs(sx - cx) < radius*1.5 and abs(sy - cy) < radius*1.5:
-        sx = random.randint(radius, w - radius)
-        sy = random.randint(radius, h - radius)
-    patch = img.crop((sx - radius, sy - radius, sx + radius, sy + radius))
-    patch = patch.filter(ImageFilter.GaussianBlur(radius=1.5))
-    def patch_fn(region):
-        return patch.copy()
-    img = apply_circular_mask(img, patch_fn, cx, cy, radius, feather=0.3)
-    return {
-        'type': 'object_removed',
-        'hint': 'Background element removed',
-        'x': cx, 'y': cy,
-        'hitR': int(radius * 0.7)
-    }
+    sx = max(radius, min(w - radius, cx + offset_x))
+    sy = max(radius, min(h - radius, cy + offset_y))
+    source = (sx - radius, sy - radius, sx + radius, sy + radius)
+    paste_patch(img, source, (cx - radius, cy - radius), radius, max(3, radius // 8))
 
-def edit_adjust_brightness(img):
-    """Adjust brightness of a region (lighten or darken)."""
-    cx, cy, radius = find_editable_region(img, min_size=50, require_variance=True)
-    factor = random.choice([0.6, 0.7, 1.3, 1.4])  # stronger darken/brighten
-    def brightness_fn(region):
-        enhancer = ImageEnhance.Brightness(region)
-        return enhancer.enhance(factor)
-    img = apply_circular_mask(img, brightness_fn, cx, cy, radius, feather=0.2)
-    return {
-        'type': 'brightness_changed',
-        'hint': 'Area brighter/darker',
-        'x': cx, 'y': cy,
-        'hitR': int(radius * 0.8)
-    }
 
-def edit_adjust_contrast(img):
-    """Adjust contrast of a region."""
-    cx, cy, radius = find_editable_region(img, min_size=50, require_variance=True)
-    factor = random.choice([0.5, 0.6, 1.5, 1.7])  # stronger contrast change
-    def contrast_fn(region):
-        enhancer = ImageEnhance.Contrast(region)
-        return enhancer.enhance(factor)
-    img = apply_circular_mask(img, contrast_fn, cx, cy, radius, feather=0.2)
-    return {
-        'type': 'contrast_changed',
-        'hint': 'Area contrast changed',
-        'x': cx, 'y': cy,
-        'hitR': int(radius * 0.8)
-    }
+def recolor_existing_region(img, cx, cy, radius):
+    """Shift the existing region's hue strongly enough to be findable,
+    without painting an artificial solid shape over the image."""
+    box = (cx - radius, cy - radius, cx + radius, cy + radius)
+    region = img.crop(box).convert("RGB")
+    hsv = region.convert("HSV")
+    h, s, v = hsv.split()
+    shift = random.choice((-48, 48, 64, -64))
+    values = [((value + shift) % 256) for value in h.getdata()]
+    shifted_h = Image.new("L", h.size)
+    shifted_h.putdata(values)
+    shifted = Image.merge("HSV", (shifted_h, s, v)).convert("RGB")
+    # Preserve texture and shading; do not replace it with a flat color.
+    shifted = Image.blend(region, shifted, 0.78)
+    mask = soft_circle_mask(shifted.width, max(4, radius // 8))
+    img.paste(shifted, (cx - radius, cy - radius), mask)
 
-def modify_photo(input_path, output_path, seed=None):
-    if seed is not None:
-        random.seed(seed)
 
-    img = Image.open(input_path).convert('RGB')
-    w, h = img.size
+def resize_existing_region(img, cx, cy, radius):
+    """Subtly change the apparent size of existing visual content by scaling
+    its crop, while keeping the edit bounded and photo-like."""
+    box = (cx - radius, cy - radius, cx + radius, cy + radius)
+    region = img.crop(box)
+    enlarged = region.resize((region.width + 12, region.height + 12), Image.Resampling.LANCZOS)
+    crop = enlarged.crop((6, 6, 6 + region.width, 6 + region.height))
+    mask = soft_circle_mask(region.width, max(4, radius // 8))
+    img.paste(crop, (cx - radius, cy - radius), mask)
 
-    edits = [
-        edit_remove_object,
-        edit_change_object_color,
-        edit_remove_background,
-        edit_adjust_brightness,
-        edit_adjust_contrast,
-    ]
 
+def create_pair(input_path, output_path, manifest_path, seed=17):
+    random.seed(seed)
+    img = Image.open(input_path).convert("RGB")
     mods = []
-    # Apply each edit type once
-    for edit_fn in edits:
-        try:
-            mod = edit_fn(img)
-            mods.append(mod)
-        except Exception as e:
-            print(f"Edit {edit_fn.__name__} failed: {e}", file=sys.stderr)
-            # fallback: try a simple brightness change
-            cx, cy, radius = w//2, h//2, 50
-            def fb_fn(region):
-                return ImageEnhance.Brightness(region).enhance(1.3)
-            img = apply_circular_mask(img, fb_fn, cx, cy, radius, feather=0.2)
-            mods.append({
-                'type': 'brightness_changed',
-                'hint': 'Area brighter',
-                'x': cx, 'y': cy,
-                'hitR': 40
-            })
 
-    img.save(output_path, quality=92)
+    # 1) Existing-object color change. No solid fill or synthetic object.
+    cx, cy, r = find_region(img, 35, 52, min_variance=22)
+    recolor_existing_region(img, cx, cy, r)
+    mods.append({"type": "color_changed", "hint": "An existing object changed color",
+                 "x": cx, "y": cy, "hitR": max(34, int(r * 0.82))})
+
+    # 2) Remove a small foreground object by cloning nearby texture.
+    cx, cy, r = find_region(img, 32, 48, min_variance=24)
+    remove_with_nearby_clone(img, cx, cy, r, random.choice((-2, 2)) * r, -r)
+    mods.append({"type": "object_removed", "hint": "A small object is missing",
+                 "x": cx, "y": cy, "hitR": max(34, int(r * 0.82))})
+
+    # 3) Remove another scene element with a larger, softly healed patch.
+    cx, cy, r = find_region(img, 42, 62, min_variance=26)
+    remove_with_nearby_clone(img, cx, cy, r, -2 * r, random.choice((-2, 2)) * r)
+    mods.append({"type": "background_removed", "hint": "A background element is missing",
+                 "x": cx, "y": cy, "hitR": max(38, int(r * 0.78))})
+
+    # 4) Existing region is slightly larger/smaller — no new pixels added.
+    cx, cy, r = find_region(img, 34, 50, min_variance=24)
+    resize_existing_region(img, cx, cy, r)
+    mods.append({"type": "size_changed", "hint": "An existing object changed size",
+                 "x": cx, "y": cy, "hitR": max(35, int(r * 0.82))})
+
+    # 5) A second existing-object color change, with a different hue direction.
+    cx, cy, r = find_region(img, 30, 48, min_variance=28)
+    recolor_existing_region(img, cx, cy, r)
+    mods.append({"type": "color_changed", "hint": "Another object changed color",
+                 "x": cx, "y": cy, "hitR": max(34, int(r * 0.82))})
+
+    img.save(output_path, quality=94, subsampling=0)
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(mods, f, indent=2)
     return mods
 
-if __name__ == '__main__':
-    if len(sys.argv) < 3:
-        print("Usage: python3 photo_editor.py <input.jpg> <output.jpg>")
-        sys.exit(1)
-    mods = modify_photo(sys.argv[1], sys.argv[2])
-    print(json.dumps(mods, indent=2))
-    print(f"\nApplied {len(mods)} modifications to {sys.argv[2]}", file=sys.stderr)
+
+if __name__ == "__main__":
+    if len(sys.argv) != 4:
+        raise SystemExit("Usage: photo_editor.py INPUT.jpg OUTPUT.jpg MANIFEST.json")
+    result = create_pair(sys.argv[1], sys.argv[2], sys.argv[3])
+    print(json.dumps(result, indent=2))
+    print(f"Applied {len(result)} non-synthetic edits", file=sys.stderr)
