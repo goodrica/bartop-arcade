@@ -44,10 +44,18 @@ const PHOTO_HIT_RADIUS  = 55;
 // Each entry maps a base photo filename to its modified version + diffs.
 // The editor script (scripts/photo_editor.py) produces {name}__modified.jpg
 // and {name}__mods.json.
+// Fixed progression for the first four playable levels.
+// Level 1 is the purchased tennis photo; later levels use the new Riverflow pairs.
 const PHOTO_PAIRS = [
-  { base: 'purchased__tennis-girls',   modified: 'purchased__tennis-girls__modified' },
-  { base: 'purchased__sierra-mountains', modified: 'purchased__sierra-mountains__modified' },
+  { base: 'purchased__tennis-girls', modified: 'purchased__tennis-girls__riverflow25-normalized' },
+  { base: 'animals__dog',            modified: 'animals__dog__riverflow25-normalized' },
+  { base: 'vehicles__classic-car',  modified: 'vehicles__classic-car__riverflow25-normalized' },
+  { base: 'food__burger',            modified: 'food__burger__riverflow25-normalized' },
 ];
+
+function pairForLevel(level) {
+  return PHOTO_PAIRS[Math.min(Math.max(level, 1), PHOTO_PAIRS.length) - 1];
+}
 
 // ── Per-round state ──
 let leftImg         = null;   // Reference photo (original)
@@ -74,8 +82,8 @@ function loadImage(path) {
 async function generateRound() {
   loadError = null;
 
-  // Pick a pair
-  const pair = PHOTO_PAIRS[Math.floor(Math.random() * PHOTO_PAIRS.length)];
+  // Fixed progression: level 1 tennis, then dog, classic car, burger.
+  const pair = pairForLevel(getLevel());
   const basePath = `assets/photos/${pair.base}.jpg`;
   const modPath  = `assets/photos/${pair.modified}.jpg`;
   const jsonPath = `assets/photos/${pair.base}__mods.json`;

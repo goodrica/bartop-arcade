@@ -2,36 +2,36 @@
   {
     "type": "object_removed",
     "hint": "Something is missing",
-    "x": 645,
-    "y": 420,
+    "x": 45,
+    "y": 470,
     "hitR": 70
   },
   {
     "type": "color_changed",
     "hint": "An existing object changed color",
-    "x": 1270,
-    "y": 170,
+    "x": 270,
+    "y": 420,
     "hitR": 70
   },
   {
     "type": "background_removed",
     "hint": "A background detail is missing",
-    "x": 295,
-    "y": 170,
+    "x": 420,
+    "y": 520,
     "hitR": 70
   },
   {
     "type": "object_changed",
     "hint": "An existing detail changed",
-    "x": 645,
-    "y": 770,
+    "x": 995,
+    "y": 470,
     "hitR": 70
   },
   {
     "type": "color_changed",
     "hint": "Another existing object changed color",
-    "x": 670,
-    "y": 595,
+    "x": 445,
+    "y": 345,
     "hitR": 70
   }
 ]
