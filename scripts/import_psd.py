@@ -43,33 +43,73 @@ SRC_W, SRC_H = 1360, 900
 MIN_BLOB = 200          # pixels; ignores stray dots and text scribbles
 TOTAL_DIFFS = 5
 JPEG_QUALITY = 95
+PHOTO_LAYER = mk.PHOTO_LAYER   # 'photo' — the bottom layer that holds the edit
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
-def is_marks(layer) -> bool:
-    return layer.name.upper().lstrip().startswith(mk.MARKS_LAYER)
+def layer_index_of_photo(psd: PSDImage):
+    """The bottom layer named 'photo' (layer records are stored bottom first)."""
+    names = [l.name.lower().strip() for l in psd]
+    if PHOTO_LAYER in names:
+        return names.index(PHOTO_LAYER)
+    return 0
 
 
-def flatten_photo(psd: PSDImage) -> Image.Image:
-    """Every visible layer except MARKS — the circles never reach the game."""
-    return psd.composite(
-        layer_filter=lambda l: (not is_marks(l)) and l.is_visible(),
-        force=True,
-        apply_icc=False,
-    ).convert("RGB")
+def raster_of(layer, canvas) -> np.ndarray | None:
+    """Full-canvas RGBA float array for a layer, vector shape layers included.
+
+    Pixel layers expose pixels directly; shape/text layers have to be rendered,
+    and their raster comes back layer-sized, so it is pasted at the bbox origin.
+    """
+    arr = layer.numpy()
+    if arr is None:
+        try:
+            img = layer.composite()
+        except Exception:
+            img = None
+        if img is None:
+            return None
+        arr = np.asarray(img.convert("RGBA"), dtype=np.float32) / 255.0
+        box = layer.bbox
+        if box is None:
+            return None
+        full = np.zeros((canvas[1], canvas[0], 4), dtype=np.float32)
+        x0, y0, x1, y1 = box
+        h, w = min(y1 - y0, arr.shape[0]), min(x1 - x0, arr.shape[1])
+        if h > 0 and w > 0:
+            full[y0:y0 + h, x0:x0 + w] = arr[:h, :w]
+        return full
+    return arr
 
 
-def marks_mask(psd: PSDImage) -> np.ndarray:
-    """Boolean mask of yellow marker pixels across all MARKS layers."""
-    h, w = psd.height, psd.width
-    mask = np.zeros((h, w), dtype=bool)
-    found_layer = False
-    for layer in psd:
-        if not is_marks(layer) or not layer.is_visible():
+def flatten_photo(psd: PSDImage) -> tuple[Image.Image, int]:
+    """Everything from the bottom up to and including the layer named 'photo'.
+
+    Any layer above it — the yellow circle layers, whatever they are named —
+    is left out, so markers can never reach the game image.
+    """
+    idx = layer_index_of_photo(psd)
+    stack = list(psd)[:idx + 1]
+    canvas = np.zeros((psd.height, psd.width, 3), dtype=np.float32)
+    for layer in stack:
+        if not layer.is_visible():
             continue
-        found_layer = True
-        arr = layer.numpy()
+        arr = raster_of(layer, (psd.width, psd.height))
+        if arr is None:
+            continue
+        a = arr[:, :, 3:4]
+        canvas = arr[:, :, :3] * a + canvas * (1 - a)
+    return Image.fromarray((canvas * 255).round().astype(np.uint8), "RGB"), idx
+
+
+def marks_mask(psd: PSDImage, photo_idx: int) -> np.ndarray:
+    """Marker-coloured pixels on every layer above the photo layer."""
+    mask = np.zeros((psd.height, psd.width), dtype=bool)
+    for layer in list(psd)[photo_idx + 1:]:
+        if not layer.is_visible():
+            continue
+        arr = raster_of(layer, (psd.width, psd.height))
         if arr is None:
             continue
         a = arr[:, :, 3]
@@ -79,11 +119,6 @@ def marks_mask(psd: PSDImage) -> np.ndarray:
         r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
         yellow = live & (r > 0.45) & (g > 0.35) & (b < 0.60) & ((r - b) > 0.20) & ((g - b) > 0.15)
         mask |= yellow
-    if not found_layer:
-        raise SystemExit(
-            f"no layer named '{mk.MARKS_LAYER}' in the PSD — do not flatten the image "
-            "before saving; the MARKS layer is what carries the tap coordinates"
-        )
     return mask
 
 
@@ -141,13 +176,28 @@ def classify(base: Image.Image, edited: Image.Image, x: int, y: int, r: int) -> 
     return "object_changed", "An existing object changed"
 
 
-def subtlety(base: Image.Image, edited: Image.Image, x: int, y: int, r: int) -> float:
-    """Mean per-channel delta inside the circle: the findability gauge."""
+def subtlety(base: Image.Image, edited: Image.Image, x: int, y: int, r: int) -> dict:
+    """How findable the change is, measured inside the marked circle.
+
+    A ring is usually much larger than the edit it surrounds, so the mean delta
+    (which averages the whole circle) understates a small change. `strong` — the
+    number of pixels differing by more than 40/255 — is what tracks visibility.
+    """
     pad = max(12, int(r * 0.8))
     box = (max(0, x - pad), max(0, y - pad), min(SRC_W, x + pad), min(SRC_H, y + pad))
     a = np.asarray(base.crop(box), dtype=np.int16)
     b = np.asarray(edited.crop(box), dtype=np.int16)
-    return round(float(np.abs(a - b).mean()), 1)
+    d = np.abs(a - b).mean(axis=2)
+    mean = float(d.mean())
+    peak = int(d.max())
+    strong = int((d > 40).sum())
+    if strong < 60 and peak < 55:
+        verdict = "too subtle"
+    elif strong > 6000 or peak > 210:
+        verdict = "obvious"
+    else:
+        verdict = "ok"
+    return {"mean": round(mean, 1), "peak": peak, "strong": strong, "verdict": verdict}
 
 
 # ── main import ─────────────────────────────────────────────────────────────
@@ -160,8 +210,17 @@ def import_one(base: str, quiet: bool = False) -> dict:
     psd = PSDImage.open(psd_path)
     notes: list[str] = []
 
-    photo = flatten_photo(psd)
-    mask = marks_mask(psd)
+    photo, photo_idx = flatten_photo(psd)
+    mask = marks_mask(psd, photo_idx)
+
+    # Report exactly what was used as the photo and what was dropped.
+    used = [l.name for l in list(psd)[:photo_idx + 1]]
+    dropped = [l.name for l in list(psd)[photo_idx + 1:]]
+    if PHOTO_LAYER not in [n.lower().strip() for n in used]:
+        notes.append(f"no layer named '{PHOTO_LAYER}' found; used the bottom layer "
+                     f"({used[0]!r}) as the photo")
+    if not dropped:
+        notes.append("no layers above the photo layer — nothing carried any circles")
 
     sx, sy = SRC_W / psd.width, SRC_H / psd.height
     resized = (psd.width, psd.height) != (SRC_W, SRC_H)
@@ -176,8 +235,8 @@ def import_one(base: str, quiet: bool = False) -> dict:
         blobs = sorted(blobs, key=lambda b: b["area"], reverse=True)[:TOTAL_DIFFS]
         blobs = reading_order(blobs)
     if not blobs:
-        notes.append("no yellow circles found on the MARKS layer — draw one ring "
-                     "around each of your 5 changes")
+        notes.append("no yellow circles found above the photo layer — draw one ring "
+                     "(or filled circle) around each of your 5 changes")
 
     # Always export the edited photo: their pixel work should never be lost.
     out_jpg = prep.edited_path(base)
@@ -205,9 +264,9 @@ def import_one(base: str, quiet: bool = False) -> dict:
         r = b["r"] * sx
         hit = int(min(170, max(45, round(r * 1.15))))
         typ, hint = classify(base_img, photo, x, y, r)
-        score = subtlety(base_img, photo, x, y, r)
+        stat = subtlety(base_img, photo, x, y, r)
         diffs.append({"type": typ, "hint": hint, "x": x, "y": y, "hitR": hit})
-        rows.append((x, y, hit, r, score))
+        rows.append((x, y, hit, r, stat))
 
     prep.manifest_path(base).write_text(json.dumps(diffs, indent=2) + "\n", encoding="utf-8")
     if len(diffs) != TOTAL_DIFFS:
@@ -225,12 +284,14 @@ def import_one(base: str, quiet: bool = False) -> dict:
 
     if not quiet:
         print(f"\n{base}")
+        print(f"  layers kept as the photo : {', '.join(used)}")
+        if dropped:
+            print(f"  layers ignored (markers) : {', '.join(dropped)}")
         print(f"  wrote {out_jpg.relative_to(ROOT)}  ({out_jpg.stat().st_size/1e6:.2f} MB)")
         print(f"  wrote {prep.manifest_path(base).relative_to(ROOT)}  ({len(diffs)} diffs)")
-        for i, (x, y, hit, r, score) in enumerate(rows, 1):
-            flag = "too subtle" if score < 8 else ("obvious" if score > 45 else "ok")
+        for i, (x, y, hit, r, stat) in enumerate(rows, 1):
             print(f"    diff {i}: x{x:>4} y{y:>4}  circle r={r:5.1f}  hitR={hit:>3}  "
-                  f"delta={score:>5}  ({flag})")
+                  f"changed px>40: {stat['strong']:>5}  peak={stat['peak']:>3}  ({stat['verdict']})")
         for n in notes:
             print(f"  ! {n}")
     return result

@@ -1,37 +1,37 @@
 [
   {
-    "type": "object_removed",
-    "hint": "An existing object is missing",
-    "x": null,
-    "y": null,
-    "hitR": 70
+    "type": "object_changed",
+    "hint": "An existing object changed",
+    "x": 554,
+    "y": 140,
+    "hitR": 61
+  },
+  {
+    "type": "object_changed",
+    "hint": "An existing object changed",
+    "x": 278,
+    "y": 199,
+    "hitR": 73
   },
   {
     "type": "color_changed",
     "hint": "An existing object changed color",
-    "x": null,
-    "y": null,
-    "hitR": 70
+    "x": 882,
+    "y": 250,
+    "hitR": 45
   },
   {
-    "type": "object_resized",
-    "hint": "An existing object is bigger or smaller",
-    "x": null,
-    "y": null,
-    "hitR": 70
+    "type": "object_changed",
+    "hint": "An existing object changed",
+    "x": 1081,
+    "y": 633,
+    "hitR": 92
   },
   {
-    "type": "object_moved",
-    "hint": "An existing object moved or turned",
-    "x": null,
-    "y": null,
-    "hitR": 70
-  },
-  {
-    "type": "background_removed",
-    "hint": "A background detail is missing",
-    "x": null,
-    "y": null,
-    "hitR": 70
+    "type": "object_changed",
+    "hint": "An existing object changed",
+    "x": 329,
+    "y": 855,
+    "hitR": 79
   }
 ]

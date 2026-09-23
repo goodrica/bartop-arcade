@@ -21,11 +21,15 @@ Every photo already has a layered working file waiting for you:
 assets/photos/psd/<base>.psd      ← 98 of them, two layers each
 ```
 
-The PSD opens with exactly two layers:
+The PSD opens with exactly two layers (PSD stores the bottom layer first, so `MARKS` sits on
+top and is the one selected when you open the file):
 
-- **`MARKS`** (top, transparent) — draw a **yellow circle** around each of your 5 changes.
-  Crisp yellow, ~4–6 px stroke. This layer is a scratchpad: it is *never* part of the game
-  image, it only tells the importer where the changes are.
+- **`MARKS`** (top, transparent) — mark each of your 5 changes with a **yellow shape**:
+  a ring or a filled circle, both work. ~4–6 px stroke if you use a ring. This layer is a
+  scratchpad: it is *never* part of the game image, it only tells the importer where the
+  changes are. You can also draw on extra layers you add above `photo` — everything above
+  the `photo` layer counts as a marker, and everything from the bottom up to and including
+  `photo` is what becomes the game image.
 - **`photo`** (bottom) — make your 5 changes here. Do **not** draw circles on this layer,
   or they end up baked into the game image.
 
@@ -36,18 +40,25 @@ cd /home/andrew/bartop-arcade
 python3 scripts/import_psd.py <base>       # or --all, or --status
 ```
 
-The importer flattens every layer **except** `MARKS` into `<base>__edited.jpg`, reads the
-yellow circles as tap coordinates, classifies each change, writes `<base>__mods.json`, and
-regenerates the game's pair index. One command turns a layered file into a finished level.
+The importer keeps every layer from the bottom up to and including `photo` and turns them
+into `<base>__edited.jpg`; every layer above `photo` is read for yellow markers and then
+dropped, so markers can never reach the game image. Each marked area becomes a diff: its
+centre is the tap point and its radius sets the hit zone, and it reports a **findability
+check** per area:
 
-It also reports a **subtlety delta** per circle — the mean pixel difference inside that
-circle — so you can see immediately whether a change is fair:
-
-| delta | verdict | meaning |
+| reading | verdict | meaning |
 | --- | --- | --- |
-| < 8 | too subtle | the player will never see it; make the change stronger |
-| 8 – 45 | ok | the target feel: missed at first glance, obvious when looked at |
-| > 45 | obvious | fine for an early level, too easy later |
+| < 60 changed px and peak < 55 | too subtle | the player will never see it; strengthen the edit |
+| 60+ changed px, peak below 210 | ok | the target feel: missed at first glance, obvious when looked at |
+| > 6000 changed px or peak above 210 | obvious | fine for an early level, too easy later |
+
+"changed px" counts pixels differing by more than 40/255 inside the marked area — a marker
+area is usually much larger than the edit it surrounds, so a plain average would understate
+a small but perfectly visible change.
+
+Taps count on **either photo pane**: the game hit-tests the reference photo on the left and
+the modified photo on the right, so a player tapping the change they can see scores the
+same either way.
 
 ### Editing the PSDs
 
@@ -55,14 +66,15 @@ circle — so you can see immediately whether a change is fair:
 `assets/photos/psd/<base>.psd` → edit → File → Save (Ctrl/Cmd-S writes back over the same
 file). Layer names are preserved, so the importer can still find `MARKS`.
 
-- **Do not flatten the image** before saving — that destroys the `MARKS` layer and the
-  importer will refuse, telling you why.
+- **Do not flatten the image** before saving — that destroys the layer structure and the
+  importer will tell you it found no markers.
 - Keep the canvas at 1360×900. If you crop or resize, the importer rescales and warns, but
   coordinates get less accurate.
 - Changes to existing content only: remove an object (clone/heal it away), recolor an object
   (keep its texture and shading), resize or rotate an object, remove a background detail.
   No pasted-on bright shapes, no global color grading, no microscopic tweaks. The target
-  feel: *missed at first glance, obvious once you look in the right area*.
+  feel: *missed at first glance, obvious once you look in the right area*. The marker
+  shapes themselves may of course be bright — they are never part of the game image.
 - Save the PSD; the importer does the JPEG export. Don't hand-export JPEGs.
 
 ## Batch and status commands

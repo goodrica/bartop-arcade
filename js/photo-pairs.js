@@ -15,7 +15,8 @@ export const PHOTO_PAIRS = [
   { base: 'purchased__sierra-mountains', modified: 'purchased__sierra-mountains__edited' },
   { base: 'purchased__tennis-girls', modified: 'purchased__tennis-girls__edited' },
   { base: 'vehicles__classic-car', modified: 'vehicles__classic-car__edited' },
+  { base: 'vehicles__truck', modified: 'vehicles__truck__edited' },
 ];
 
-/** 5 playable pair(s) out of 98 base photos. */
+/** 6 playable pair(s) out of 98 base photos. */
 export const PAIR_COUNT = PHOTO_PAIRS.length;

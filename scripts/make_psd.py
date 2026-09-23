@@ -165,19 +165,20 @@ def write_psd(path: Path, photo: Image.Image, marks: Image.Image | None = None) 
             for c in (0, 1, 2)
         ]
 
+    # Layer records are stored BOTTOM FIRST: 'photo' goes in first so that
+    # 'MARKS' ends up above it and is visible/editable in Photopea.
     def channels_blob(chans):
         return [(cid, deflate_channel(plane)) for cid, plane in chans]
 
     marks_blob = channels_blob(marks_channels)
     photo_blob = channels_blob(photo_channels)
 
-    # Layer records store only lengths in the header area: build data first.
     marks_rec = layer_record(MARKS_LAYER, (0, 0, h, w), marks_blob)
     photo_rec = layer_record(PHOTO_LAYER, (0, 0, h, w), photo_blob)
     marks_data = b"".join(d for _, d in marks_blob)
     photo_data = b"".join(d for _, d in photo_blob)
 
-    layer_info = struct.pack(">h", 2) + marks_rec + photo_rec + marks_data + photo_data
+    layer_info = struct.pack(">h", 2) + photo_rec + marks_rec + photo_data + marks_data
     layer_info += b"\x00" * (-len(layer_info) % 2)   # pad to even
 
     out = bytearray()
@@ -219,6 +220,7 @@ def main():
     ap.add_argument("base", nargs="?", help="photo stem, e.g. animals__dog")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--list", action="store_true", help="show which PSDs exist")
+    ap.add_argument("--skip", default=None, help="with --all: do not touch this photo's PSD")
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
 
@@ -238,6 +240,9 @@ def main():
     made = 0
     for b in targets:
         if args.base and b != args.base:
+            continue
+        if args.skip and b == args.skip:
+            print(f"  skip     {b} (protected)")
             continue
         st = make(b, args.force)
         made += st == "created"
