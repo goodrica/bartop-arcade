@@ -3,3 +3,9 @@
 *.swo
 *.bak
 node_modules/
+.venv/
+__pycache__/
+
+# Layered working files for manual Photo Hunt edits: large, derived, and
+# regenerated on demand by scripts/make_psd.py
+assets/photos/psd/

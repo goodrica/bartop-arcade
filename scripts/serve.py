@@ -31,7 +31,12 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 PHOTO_DIR = ROOT / "assets" / "photos"
+PSD_DIR = PHOTO_DIR / "psd"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8091
+
+# The PSD scripts need psd-tools, which lives in the project venv.
+VENV_PY = ROOT / ".venv" / "bin" / "python"
+PYTHON = str(VENV_PY if VENV_PY.exists() else Path(sys.executable))
 
 sys.path.insert(0, str(ROOT / "scripts"))
 import prepare_manual_edits as prep  # noqa: E402
@@ -133,9 +138,22 @@ def status_payload():
             "located": r["located"],
             "total": r["total"],
             "ready": r["ready"],
+            "psd": (PSD_DIR / f"{r['base']}.psd").exists(),
             "state": "ready" if r["ready"] else ("wip" if (r["touched"] or r["located"]) else "todo"),
         })
-    return {"pairs": out, "ready": sum(1 for r in out if r["ready"]), "total": len(out)}
+    return {"pairs": out, "ready": sum(1 for r in out if r["ready"]), "total": len(out),
+            "psd": sum(1 for r in out if r["psd"])}
+
+
+def run_psd_script(script: str, base: str):
+    if not prep.BASE_RE.match(f"{base}.jpg"):
+        return {"error": "bad base name"}, 400
+    proc = subprocess.run([PYTHON, str(ROOT / "scripts" / script), base],
+                          capture_output=True, text=True, cwd=str(ROOT), timeout=300)
+    out = (proc.stdout + proc.stderr).strip()
+    if proc.returncode != 0:
+        return {"error": out.splitlines()[-1] if out else f"{script} failed"}, 500
+    return {"ok": True, "output": out, **rebuild()}, 200
 
 
 def rebuild():
@@ -206,6 +224,14 @@ class Handler(SimpleHTTPRequestHandler):
 
         if u.path == "/api/rebuild":
             return self._json(rebuild())
+
+        if u.path == "/api/make-psd":
+            body, code = run_psd_script("make_psd.py", payload.get("base", ""))
+            return self._json(body, code)
+
+        if u.path == "/api/import-psd":
+            body, code = run_psd_script("import_psd.py", payload.get("base", ""))
+            return self._json(body, code)
 
         return self._json({"error": "unknown endpoint"}, 404)
 

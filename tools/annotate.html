@@ -122,6 +122,16 @@
       <span class="hint grow" id="detectInfo"></span>
     </div>
     <div class="hint" id="pathInfo"></div>
+    <div class="stagebar">
+      <button id="mkpsd">1 · Create layered PSD for this photo</button>
+      <button id="impsd">2 · Import the saved PSD (circles → diffs)</button>
+      <span class="hint grow" id="psdInfo"></span>
+    </div>
+    <div class="hint">Workflow: click <b>Create layered PSD</b> → open
+      <code>assets/photos/psd/&lt;name&gt;.psd</code> in Photopea → edit the
+      <b>photo</b> layer, draw yellow circles on the <b>MARKS</b> layer → save the PSD →
+      click <b>Import the saved PSD</b>. Coordinates come from the circles; you can still
+      nudge them by hand below.</div>
   </section>
 
   <aside class="right">
@@ -445,6 +455,32 @@ async function save() {
   refresh();
 }
 document.getElementById('save').onclick = save;
+
+async function psdAction(which) {
+  if (!state.sel) return;
+  const el = document.getElementById('psdInfo');
+  el.textContent = which === 'make' ? 'building PSD…' : 'reading PSD…';
+  try {
+    const res = await fetch('/api/' + (which === 'make' ? 'make-psd' : 'import-psd'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base: state.sel.base }),
+    });
+    const j = await res.json();
+    if (!res.ok) { el.textContent = ''; toast(j.error || 'failed', true); return; }
+    const notes = (j.output || '').split('\n').filter(l => l.trim());
+    el.textContent = notes.slice(-6).join(' · ');
+    toast(which === 'make'
+      ? `PSD ready: assets/photos/psd/${state.sel.base}.psd`
+      : `imported — ${j.pairs} playable pair(s)`);
+    refresh();
+    if (which === 'import') select(state.list.find(p => p.base === state.sel.base) || state.sel);
+  } catch (e) {
+    el.textContent = '';
+    toast(String(e), true);
+  }
+}
+document.getElementById('mkpsd').onclick = () => psdAction('make');
+document.getElementById('impsd').onclick = () => psdAction('import');
 
 renderSlots();
 refresh();
