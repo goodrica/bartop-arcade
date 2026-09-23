@@ -97,10 +97,36 @@ tennis girls came from the earlier AI edits, so you can refine those directly.
 python3 scripts/serve.py            # http://127.0.0.1:8091
 ```
 
+Open <http://127.0.0.1:8091>, tap the **PHOTO HUNT** card, and the splash shows `LEVEL 1`.
 Photo Hunt walks the playable pairs in order: level 1 = first pair in `js/photo-pairs.js`,
-level 2 = second, and so on, cycling after the last. A pair only becomes playable when its
-edited image exists **and** differs from the base **and** its manifest has 5 located diffs,
-so an unfinished photo can never be served with coordinates for changes that aren't there.
+level 2 = second, and so on, cycling after the last. **Play Again** moves to the next level;
+**Menu** resets you to level 1. The server only serves static files, so a page reload picks
+up any change — no restart needed.
+
+### Putting a photo at level 1
+
+`assets/photos/edit-priority.json` is a plain list of base names that are played first, in
+that order:
+
+```json
+["vehicles__truck"]
+```
+
+Photos listed there come first (so the first entry is level 1), everything else follows
+alphabetically. Regenerate the index after editing it:
+
+```bash
+python3 scripts/prepare_manual_edits.py     # rewrites js/photo-pairs.js
+```
+
+To see the mapped tap zones without playing, open the annotator
+(<http://127.0.0.1:8091/tools/annotate.html>), pick the photo, and the 5 stored diffs appear
+as numbered circles over the pair — with an A/B flip and a changed-pixel overlay for judging
+whether each change is fair.
+
+A pair only becomes playable when its edited image exists **and** differs from the base
+**and** its manifest has 5 located diffs, so an unfinished photo can never be served with
+coordinates for changes that aren't there.
 
 ## What counts as playable
 

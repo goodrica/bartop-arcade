@@ -18,22 +18,26 @@ Run:  python3 tests/cdp_both_panes_test.py
 
 import asyncio
 import json
+import re
 import urllib.request
+from pathlib import Path
 
 import websockets
 
 CDP_PORT = 9222
 PAGE_URL = "http://127.0.0.1:8091/index.html"
+PAIRS_JS = Path(__file__).resolve().parent.parent / "js" / "photo-pairs.js"
 
 # logical 1920x1080 canvas coordinates
 MENU_CARD = (960, 380)          # the single game card
 PLAY_AGAIN = (750, 850)         # left results button
 PANE_DX = 936                   # right pane origin minus left pane origin
+ROUNDS = 6
 
-EXPECTED_PAIRS = [
-    "animals__dog", "food__burger", "purchased__sierra-mountains",
-    "purchased__tennis-girls", "vehicles__classic-car", "vehicles__truck",
-]
+
+def play_order():
+    """The level order the game will actually use, read from the pair index."""
+    return re.findall(r"base: '([^']+)'", PAIRS_JS.read_text(encoding="utf-8"))[:ROUNDS]
 
 msg_id = 0
 exceptions = []
@@ -132,16 +136,19 @@ async def main():
         screen = await ev(ws, "window.__bartopDebug.screen")
         check("game started", screen == "playing", f"screen={screen}")
 
-        for round_no in range(1, 7):
+        order = play_order()
+        print(f"level order from js/photo-pairs.js: {order}\n")
+
+        for round_no in range(1, ROUNDS + 1):
             await asyncio.sleep(2.4)          # splash
             ds = await diffs(ws)
             gd = await game(ws)
-            if round_no == 6:
-                photos = await loaded_photos(ws)
-                check("round 6 loaded the hand-edited truck pair",
-                      any("vehicles__truck__edited" in p for p in photos)
-                      and any(p.startswith("vehicles__truck.jpg") for p in photos),
-                      ", ".join(sorted({p for p in photos if "truck" in p})))
+            expected = order[round_no - 1]
+            photos = await loaded_photos(ws)
+            check(f"round {round_no} loaded {expected}",
+                  any(p == f"{expected}.jpg" for p in photos)
+                  and any(p.startswith(f"{expected}__edited") for p in photos),
+                  ", ".join(sorted({p for p in photos if expected in p})) or "nothing loaded")
             check(f"round {round_no} has 5 diffs", len(ds) == 5, f"{len(ds)} diffs")
 
             before = await game(ws)
@@ -172,7 +179,7 @@ async def main():
                   f"found={gd.get('found')} won={gd.get('won')} wrong={gd.get('wrongTaps')}")
             check(f"round {round_no} no wrong taps", gd.get("wrongTaps") == 0, f"{gd.get('wrongTaps')}")
 
-            if round_no < 6:
+            if round_no < ROUNDS:
                 await tap(ws, *PLAY_AGAIN)
                 await drain(ws, 0.8)
 

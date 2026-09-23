@@ -38,6 +38,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PHOTO_DIR = ROOT / "assets" / "photos"
 PAIRS_JS = ROOT / "js" / "photo-pairs.js"
+PRIORITY_JSON = PHOTO_DIR / "edit-priority.json"
 
 BASE_RE = re.compile(r"^([a-z]+)__([a-z0-9-]+)\.jpg$")
 TOTAL_DIFFS = 5
@@ -173,8 +174,26 @@ def scan(only: str | None = None):
     return rows
 
 
+def read_priority() -> list[str]:
+    """Optional play order: assets/photos/edit-priority.json — a list of base names.
+
+    Listed photos come first, in the listed order; everything else follows
+    alphabetically. Use it to put the photo you are working on at level 1.
+    """
+    if not PRIORITY_JSON.exists():
+        return []
+    try:
+        data = json.loads(PRIORITY_JSON.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    known = set(base_names())
+    return [b for b in data if isinstance(b, str) and b in known]
+
+
 def write_pairs_js(rows):
     ready = [r["base"] for r in rows if r["ready"]]
+    priority = [b for b in read_priority() if b in ready]
+    ready = priority + [b for b in ready if b not in priority]
     lines = [
         "/* ============================================",
         "   Bartop Arcade - Photo Hunt pair index",
@@ -185,6 +204,10 @@ def write_pairs_js(rows):
         "   A pair is listed only when:",
         "     assets/photos/<base>__edited.jpg exists AND differs from <base>.jpg",
         "     assets/photos/<base>__mods.json has 5 diffs with x/y coordinates",
+        "",
+        "   Play order is alphabetical, except for photos named in",
+        "   assets/photos/edit-priority.json, which are listed first.",
+        "   Level 1 is the first entry below.",
         "   ============================================ */",
         "",
         "export const PHOTO_PAIRS = [",
