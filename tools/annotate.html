@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Photo Hunt — Edit Annotator</title>
+<style>
+  :root {
+    --bg:#0b0d14; --panel:#141826; --panel2:#1c2133; --line:#2a3048;
+    --text:#e8ecf5; --dim:#8b93ab; --cyan:#00f0ff; --pink:#ff3fa4;
+    --green:#39ff88; --amber:#ffb545; --red:#ff5a5a;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; height:100vh; display:grid; grid-template-rows:auto 1fr;
+         background:var(--bg); color:var(--text);
+         font:14px/1.4 ui-monospace,"SF Mono",Menlo,Consolas,monospace; }
+  header { display:flex; align-items:center; gap:16px; padding:10px 16px;
+           background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { font-size:15px; margin:0; letter-spacing:.12em; color:var(--cyan); }
+  header .progress { color:var(--dim); }
+  header .progress b { color:var(--green); }
+  main { display:grid; grid-template-columns:280px 1fr 320px; min-height:0; }
+
+  aside { overflow:auto; border-right:1px solid var(--line); background:var(--panel); }
+  aside .tools { position:sticky; top:0; padding:8px; background:var(--panel);
+                 border-bottom:1px solid var(--line); display:grid; gap:6px; z-index:2;}
+  .list { padding:4px; }
+  .row { display:flex; justify-content:space-between; gap:6px; align-items:center;
+         padding:5px 8px; border-radius:5px; cursor:pointer; font-size:12px; }
+  .row:hover { background:var(--panel2); }
+  .row.sel { background:#243056; outline:1px solid var(--cyan); }
+  .row .n { color:var(--dim); font-size:11px; }
+  .badge { font-size:10px; padding:1px 6px; border-radius:99px; border:1px solid var(--line); }
+  .b-ready { color:var(--green); border-color:#1f6b42; }
+  .b-wip   { color:var(--amber); border-color:#6b5220; }
+  .b-todo  { color:var(--dim); }
+
+  section.stage { min-width:0; overflow:auto; padding:12px; display:flex;
+                  flex-direction:column; gap:8px; }
+  .strip { display:flex; gap:12px; }
+  .pane { position:relative; background:#05070c; border:1px solid var(--line); border-radius:6px; }
+  .pane h2 { position:absolute; top:-1px; left:-1px; margin:0; font-size:11px;
+             padding:3px 8px; background:var(--panel2); color:var(--dim);
+             border-radius:6px 0 6px 0; z-index:3; letter-spacing:.1em; }
+  .pane canvas { display:block; border-radius:6px; }
+  .pane.f1 { flex:1; }
+  .stagebar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .stagebar .grow { flex:1; }
+
+  aside.right { border-right:none; border-left:1px solid var(--line); }
+  .slots { padding:8px; display:grid; gap:8px; }
+  .slot { background:var(--panel2); border:1px solid var(--line); border-radius:6px;
+          padding:8px; display:grid; gap:6px; }
+  .slot.sel { border-color:var(--cyan); box-shadow:0 0 0 1px var(--cyan) inset; }
+  .slot .hd { display:flex; align-items:center; gap:6px; font-size:12px; }
+  .slot .hd .swatch { width:16px; height:16px; border-radius:4px; flex:none; }
+  .slot .hd .pos { color:var(--dim); margin-left:auto; font-size:11px; }
+  .slot input[type=text] { width:100%; }
+  input,select,button { font:inherit; color:var(--text); background:#0f1320;
+                        border:1px solid var(--line); border-radius:5px; padding:5px 7px; }
+  input[type=range] { padding:0; }
+  button { cursor:pointer; background:var(--panel2); }
+  button:hover { background:#26304a; }
+  button.primary { background:#0d5a5f; border-color:var(--cyan); color:#cffcff; }
+  button.primary:hover { background:#11727a; }
+  button.danger { border-color:#6b2626; color:#ffb0b0; }
+  .hint { color:var(--dim); font-size:11px; }
+  .field { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--dim); }
+  .field input[type=range] { flex:1; }
+  .toast { position:fixed; bottom:16px; left:50%; transform:translateX(-50%);
+           background:#0d5a5f; border:1px solid var(--cyan); color:#dffcff;
+           padding:8px 16px; border-radius:6px; opacity:0; transition:opacity .2s;
+           pointer-events:none; z-index:99; }
+  .toast.show { opacity:1; }
+  .toast.err { background:#5a1d1d; border-color:var(--red); }
+</style>
+</head>
+<body>
+<header>
+  <h1>PHOTO HUNT · EDIT ANNOTATOR</h1>
+  <span class="progress" id="prog">loading…</span>
+  <span class="hint">click the <b>EDITED</b> pane to place a mark · drag a mark to move · 1–5 selects a slot</span>
+</header>
+
+<main>
+  <aside>
+    <div class="tools">
+      <input type="text" id="filter" placeholder="filter (e.g. animals)">
+      <select id="stateFilter">
+        <option value="all">all states</option>
+        <option value="todo">todo (not edited)</option>
+        <option value="wip">in progress</option>
+        <option value="ready">ready</option>
+      </select>
+      <button id="rebuild">Regenerate photo-pairs.js</button>
+    </div>
+    <div class="list" id="list"></div>
+  </aside>
+
+  <section class="stage">
+    <div class="strip">
+      <div class="pane f1"><h2>ORIGINAL</h2><canvas id="cvBase"></canvas></div>
+      <div class="pane f1"><h2>EDITED</h2><canvas id="cvEdit"></canvas></div>
+    </div>
+    <div class="stagebar">
+      <button id="autodetect">Auto-detect 5 regions</button>
+      <button id="clearmarks">Clear marks</button>
+      <label class="field">zoom
+        <input type="range" id="zoom" min="0.25" max="1.6" step="0.05" value="0.5">
+        <span id="zoomVal">50%</span>
+      </label>
+      <button id="ab">A / B flip</button>
+      <label class="field">overlay
+        <select id="overlayMode">
+          <option value="off">off</option>
+          <option value="heat">changed pixels</option>
+        </select>
+      </label>
+      <label class="field">threshold
+        <input type="range" id="thresh" min="6" max="80" step="2" value="26">
+        <span id="threshVal">26</span>
+      </label>
+      <span class="hint grow" id="detectInfo"></span>
+    </div>
+    <div class="hint" id="pathInfo"></div>
+  </section>
+
+  <aside class="right">
+    <div class="tools">
+      <button class="primary" id="save" style="width:100%">Save manifest for this photo</button>
+      <div class="hint">Saves <span id="saveName">…</span> and regenerates the game pair list.</div>
+    </div>
+    <div class="slots" id="slots"></div>
+  </aside>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const SRC_W = 1360, SRC_H = 900;       // manifest coordinates are in this space
+const SLOT_TYPES = ['object_removed','color_changed','object_resized','object_moved','background_removed','object_changed'];
+const COLORS = ['#00f0ff','#ff3fa4','#39ff88','#ffb545','#b98cff'];
+const SLOT_HINTS = ['An existing object is missing','An existing object changed color',
+                    'An existing object is bigger or smaller','An existing object moved or turned',
+                    'A background detail is missing'];
+
+let state = { list: [], sel: null, slots: [], active: 0, zoom: 0.5, overlay: 'off',
+              thresh: 26, diff: null, baseImg: null, editedImg: null, ab: false };
+
+const cvBase = document.getElementById('cvBase');
+const cvEdit = document.getElementById('cvEdit');
+const ctxBase = cvBase.getContext('2d');
+const ctxEdit = cvEdit.getContext('2d');
+
+// ── helpers ────────────────────────────────────────────────────────────────
+const toastEl = document.getElementById('toast');
+function toast(msg, err) {
+  toastEl.textContent = msg;
+  toastEl.className = 'toast show' + (err ? ' err' : '');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { toastEl.className = 'toast'; }, 2400);
+}
+function loadImg(src) {
+  return new Promise((res, rej) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = () => rej(new Error('failed: ' + src));
+    i.src = src;
+  });
+}
+function slotName(i) { return '<' + (i + 1) + '>'; }
+function emptySlots() {
+  return Array.from({ length: 5 }, (_, i) => ({
+    type: SLOT_TYPES[0], hint: SLOT_HINTS[i], x: null, y: null, hitR: 70,
+  }));
+}
+
+// ── sidebar ────────────────────────────────────────────────────────────────
+async function refresh() {
+  const st = await (await fetch('/api/status')).json();
+  state.list = st.pairs;
+  document.getElementById('prog').innerHTML =
+    `playable <b>${st.ready}</b> / ${st.total} &nbsp;·&nbsp; edited ${
+      st.pairs.filter(p => p.touched).length} &nbsp;·&nbsp; annotated ${
+      st.pairs.filter(p => p.located >= 5).length}`;
+  renderList();
+  if (!state.sel && state.list.length) select(state.list.find(p => p.state !== 'ready') || state.list[0]);
+}
+function renderList() {
+  const q = document.getElementById('filter').value.toLowerCase();
+  const sf = document.getElementById('stateFilter').value;
+  const el = document.getElementById('list');
+  el.innerHTML = '';
+  state.list
+    .filter(p => p.base.includes(q) && (sf === 'all' || p.state === sf))
+    .forEach(p => {
+      const d = document.createElement('div');
+      d.className = 'row' + (state.sel && state.sel.base === p.base ? ' sel' : '');
+      d.innerHTML = `<span>${p.base}</span>
+        <span class="n">${p.located}/${p.total}</span>
+        <span class="badge b-${p.state}">${p.state}</span>`;
+      d.onclick = () => select(p);
+      el.appendChild(d);
+    });
+}
+document.getElementById('filter').oninput = renderList;
+document.getElementById('stateFilter').onchange = renderList;
+
+// ── load a photo ───────────────────────────────────────────────────────────
+async function select(p) {
+  state.sel = p;
+  state.slots = emptySlots();
+  state.active = 0;
+  renderList();
+  const base = p.base;
+  document.getElementById('saveName').textContent = base + '__mods.json';
+  document.getElementById('pathInfo').innerHTML =
+    `original <b>assets/photos/${base}.jpg</b> &nbsp;·&nbsp; your edit <b>assets/photos/${base}__edited.jpg</b>`
+    + (p.touched ? '' : ' &nbsp;·&nbsp; <span style="color:#ffb545">the edit file is still an untouched copy — open it in your image editor</span>');
+
+  try {
+    const [b, e, man] = await Promise.all([
+      loadImg(`/assets/photos/${base}.jpg`),
+      loadImg(`/assets/photos/${base}__edited.jpg?v=${Date.now()}`),
+      fetch(`/assets/photos/${base}__mods.json?t=${Date.now()}`).then(r => r.ok ? r.json() : null).catch(() => null),
+    ]);
+    state.baseImg = b; state.editedImg = e;
+    if (Array.isArray(man) && man.length === 5) {
+      state.slots = man.map((m, i) => ({
+        type: m.type || SLOT_TYPES[0], hint: m.hint || SLOT_HINTS[i],
+        x: typeof m.x === 'number' ? m.x : null,
+        y: typeof m.y === 'number' ? m.y : null,
+        hitR: m.hitR || 70,
+      }));
+    }
+    computeDiff();
+    draw();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+// ── client-side change map ─────────────────────────────────────────────────
+function computeDiff() {
+  state.diff = null;
+  if (!state.baseImg || !state.editedImg) return;
+  const c = document.createElement('canvas');
+  c.width = SRC_W; c.height = SRC_H;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(state.baseImg, 0, 0, SRC_W, SRC_H);
+  const A = g.getImageData(0, 0, SRC_W, SRC_H).data;
+  g.clearRect(0, 0, SRC_W, SRC_H);
+  g.drawImage(state.editedImg, 0, 0, SRC_W, SRC_H);
+  const B = g.getImageData(0, 0, SRC_W, SRC_H).data;
+  const d = new Uint8ClampedArray(SRC_W * SRC_H);
+  for (let i = 0, p = 0; i < d.length; i++, p += 4) {
+    d[i] = (Math.abs(A[p] - B[p]) + Math.abs(A[p+1] - B[p+1]) + Math.abs(A[p+2] - B[p+2])) / 3;
+  }
+  state.diff = d;
+}
+
+// ── rendering ──────────────────────────────────────────────────────────────
+function draw() {
+  if (!state.baseImg) return;
+  const s = state.zoom;
+  const w = Math.round(SRC_W * s), h = Math.round(SRC_H * s);
+  for (const [cv, ctx] of [[cvBase, ctxBase], [cvEdit, ctxEdit]]) {
+    cv.width = w; cv.height = h;
+    cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  }
+  ctxBase.imageSmoothingQuality = 'high';
+  ctxBase.drawImage(state.baseImg, 0, 0, w, h);
+  ctxEdit.drawImage(state.editedImg, 0, 0, w, h);
+
+  if (state.overlay === 'heat' && state.diff) {
+    const img = ctxEdit.getImageData(0, 0, w, h);
+    const out = img.data;
+    for (let y = 0; y < h; y++) {
+      const sy = Math.min(SRC_H - 1, Math.floor(y / s));
+      for (let x = 0; x < w; x++) {
+        const sx = Math.min(SRC_W - 1, Math.floor(x / s));
+        const v = state.diff[sy * SRC_W + sx];
+        if (v >= state.thresh) {
+          const p = (y * w + x) * 4;
+          const k = Math.min(1, (v - state.thresh) / 60);
+          out[p]     = out[p]     * (1 - k) + 255 * k;
+          out[p + 1] = out[p + 1] * (1 - k) + 0   * k;
+          out[p + 2] = out[p + 2] * (1 - k) + 140 * k;
+        }
+      }
+    }
+    ctxEdit.putImageData(img, 0, 0);
+  }
+
+  state.slots.forEach((sl, i) => {
+    if (sl.x == null || sl.y == null) return;
+    const cx = sl.x * s, cy = sl.y * s;
+    const r = (sl.hitR || 70) * s;
+    ctxEdit.save();
+    ctxEdit.strokeStyle = COLORS[i];
+    ctxEdit.fillStyle = COLORS[i];
+    ctxEdit.lineWidth = i === state.active ? 3 : 1.5;
+    ctxEdit.globalAlpha = i === state.active ? 1 : 0.75;
+    ctxEdit.beginPath(); ctxEdit.arc(cx, cy, r, 0, Math.PI * 2); ctxEdit.stroke();
+    ctxEdit.globalAlpha = 1;
+    ctxEdit.font = 'bold 15px monospace';
+    ctxEdit.fillText(String(i + 1), cx + r + 3, cy - r - 3);
+    ctxEdit.beginPath(); ctxEdit.arc(cx, cy, 3, 0, Math.PI * 2); ctxEdit.fill();
+    ctxEdit.restore();
+  });
+}
+
+// ── interaction on the edited pane ─────────────────────────────────────────
+function localXY(ev) {
+  const r = cvEdit.getBoundingClientRect();
+  return { x: (ev.clientX - r.left) / state.zoom, y: (ev.clientY - r.top) / state.zoom };
+}
+function nearest(x, y) {
+  let best = -1, bd = Infinity;
+  state.slots.forEach((s, i) => {
+    if (s.x == null) return;
+    const d = Math.hypot(s.x - x, s.y - y);
+    if (d < Math.max(40, (s.hitR || 70)) && d < bd) { bd = d; best = i; }
+  });
+  return best;
+}
+cvEdit.addEventListener('pointerdown', ev => {
+  const { x, y } = localXY(ev);
+  let i = nearest(x, y);
+  if (i === -1) {
+    i = state.slots.findIndex(s => s.x == null);
+    if (i === -1) i = state.active;
+  }
+  state.active = i;
+  const sl = state.slots[i];
+  sl.x = Math.round(Math.max(0, Math.min(SRC_W - 1, x)));
+  sl.y = Math.round(Math.max(0, Math.min(SRC_H - 1, y)));
+  cvEdit.setPointerCapture(ev.pointerId);
+  draw(); renderSlots();
+});
+cvEdit.addEventListener('pointermove', ev => {
+  if (!cvEdit.hasPointerCapture?.(ev.pointerId)) return;
+  const { x, y } = localXY(ev);
+  const sl = state.slots[state.active];
+  if (!sl) return;
+  sl.x = Math.round(Math.max(0, Math.min(SRC_W - 1, x)));
+  sl.y = Math.round(Math.max(0, Math.min(SRC_H - 1, y)));
+  draw(); renderSlots();
+});
+cvEdit.addEventListener('pointerup', ev => {
+  try { cvEdit.releasePointerCapture(ev.pointerId); } catch {}
+});
+document.addEventListener('keydown', ev => {
+  const n = parseInt(ev.key, 10);
+  if (n >= 1 && n <= 5) { state.active = n - 1; draw(); renderSlots(); }
+  if (ev.key === 's' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); save(); }
+});
+
+// ── right panel ────────────────────────────────────────────────────────────
+function renderSlots() {
+  const el = document.getElementById('slots');
+  el.innerHTML = '';
+  state.slots.forEach((sl, i) => {
+    const d = document.createElement('div');
+    d.className = 'slot' + (i === state.active ? ' sel' : '');
+    d.innerHTML = `
+      <div class="hd">
+        <span class="swatch" style="background:${COLORS[i]}"></span>
+        <b>Diff ${i + 1}</b>
+        <span class="pos">${sl.x == null ? 'click the edited pane' : `x${sl.x} y${sl.y}`}</span>
+      </div>
+      <select data-k="type">${SLOT_TYPES.map(t => `<option ${t === sl.type ? 'selected' : ''}>${t}</option>`).join('')}</select>
+      <input type="text" data-k="hint" value="${(sl.hint || '').replace(/"/g, '&quot;')}">
+      <label class="field">hit radius <input type="range" data-k="hitR" min="40" max="140" value="${sl.hitR}"><span data-v="hitR">${sl.hitR}</span></label>
+    `;
+    d.onpointerdown = () => { state.active = i; draw(); renderSlots(); };
+    d.querySelectorAll('[data-k]').forEach(inp => {
+      inp.oninput = () => {
+        const k = inp.dataset.k;
+        sl[k] = k === 'hitR' ? +inp.value : inp.value;
+        const v = d.querySelector(`[data-v="${k}"]`);
+        if (v) v.textContent = inp.value;
+        draw();
+      };
+    });
+    el.appendChild(d);
+  });
+}
+
+// ── buttons ────────────────────────────────────────────────────────────────
+document.getElementById('zoom').oninput = ev => {
+  state.zoom = +ev.target.value;
+  document.getElementById('zoomVal').textContent = Math.round(state.zoom * 100) + '%';
+  draw();
+};
+document.getElementById('thresh').oninput = ev => {
+  state.thresh = +ev.target.value;
+  document.getElementById('threshVal').textContent = ev.target.value;
+  draw();
+};
+document.getElementById('overlayMode').onchange = ev => { state.overlay = ev.target.value; draw(); };
+document.getElementById('clearmarks').onclick = () => {
+  state.slots = emptySlots(); draw(); renderSlots(); toast('marks cleared');
+};
+document.getElementById('ab').onclick = () => {
+  state.ab = !state.ab;
+  ctxEdit.clearRect(0, 0, cvEdit.width, cvEdit.height);
+  ctxEdit.drawImage(state.ab ? state.baseImg : state.editedImg, 0, 0, cvEdit.width, cvEdit.height);
+  toast(state.ab ? 'EDITED pane now shows the ORIGINAL (toggle to flip back)' : 'EDITED pane restored');
+};
+document.getElementById('autodetect').onclick = async () => {
+  if (!state.sel) return;
+  const r = await fetch('/api/diff?base=' + encodeURIComponent(state.sel.base));
+  const j = await r.json();
+  if (!j.regions || !j.regions.length) {
+    document.getElementById('detectInfo').textContent =
+      'No changed pixels found — the edited file still matches the original.';
+    return;
+  }
+  j.regions.forEach((reg, i) => {
+    if (i >= 5) return;
+    state.slots[i].x = reg.x; state.slots[i].y = reg.y;
+    state.slots[i].hitR = reg.hitR;
+    state.slots[i].peak = reg.peak; state.slots[i].score = reg.score;
+  });
+  document.getElementById('detectInfo').textContent = 'candidates: ' + j.regions.map(
+    (r, i) => `#${i+1} x${r.x},y${r.y} Δ${r.score}/peak${r.peak} (${r.w}×${r.h})`).join('  ·  ');
+  draw(); renderSlots();
+  toast(j.regions.length + ' region(s) suggested — drag to correct them');
+};
+document.getElementById('rebuild').onclick = async () => {
+  const j = await (await fetch('/api/rebuild', { method: 'POST' })).json();
+  toast(`photo-pairs.js regenerated — ${j.pairs} playable pair(s)`);
+  refresh();
+};
+async function save() {
+  if (!state.sel) return;
+  const bad = state.slots.findIndex(s => s.x == null);
+  if (bad !== -1) { toast(`Diff ${bad + 1} has no position yet`, true); return; }
+  const res = await fetch('/api/save-manifest', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ base: state.sel.base, diffs: state.slots }),
+  });
+  const j = await res.json();
+  if (!res.ok) { toast(j.error || 'save failed', true); return; }
+  toast(`saved ${state.sel.base}__mods.json — ${j.pairs} playable pair(s)`);
+  refresh();
+}
+document.getElementById('save').onclick = save;
+
+renderSlots();
+refresh();
+</script>
+</body>
+</html>

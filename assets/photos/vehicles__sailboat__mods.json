@@ -1,0 +1,37 @@
+[
+  {
+    "type": "object_removed",
+    "hint": "An existing object is missing",
+    "x": null,
+    "y": null,
+    "hitR": 70
+  },
+  {
+    "type": "color_changed",
+    "hint": "An existing object changed color",
+    "x": null,
+    "y": null,
+    "hitR": 70
+  },
+  {
+    "type": "object_resized",
+    "hint": "An existing object is bigger or smaller",
+    "x": null,
+    "y": null,
+    "hitR": 70
+  },
+  {
+    "type": "object_moved",
+    "hint": "An existing object moved or turned",
+    "x": null,
+    "y": null,
+    "hitR": 70
+  },
+  {
+    "type": "background_removed",
+    "hint": "A background detail is missing",
+    "x": null,
+    "y": null,
+    "hitR": 70
+  }
+]
