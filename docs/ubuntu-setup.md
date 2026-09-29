@@ -1,8 +1,9 @@
 # Running Bartop Arcade on Ubuntu
 
 Step-by-step guide for putting the arcade on an Ubuntu computer driving the
-17 inch landscape touchscreen (1920 × 1080). Tested target: Ubuntu 22.04 /
-24.04 desktop (GNOME). Other Linux desktops work too; only the auto-start and
+17 inch landscape touchscreen (1920 × 1080). Written for the current Ubuntu
+desktop (GNOME on Wayland, e.g. 24.04 LTS and newer; not yet tried on real
+hardware — see the end of this page). Other Linux desktops work too; only the auto-start and
 screen-blanking steps differ.
 
 ---
@@ -115,12 +116,15 @@ Reboot to check. To undo everything:
 3. Touch a corner of the screen — the pointer should land under your finger.
    If touches land on the wrong spot or are rotated:
    - With two monitors attached, touch may be mapped to the wrong one.
-     Unplug the other monitor, or (on X11) run
-     `xinput map-to-output "<touch device name>" HDMI-1`
-     (list names with `xinput list` and outputs with `xrandr`).
-   - On Ubuntu's default Wayland session, touch mapping follows the display
-     settings; if it is still wrong, pick **Ubuntu on Xorg** on the login
-     screen (gear icon) and use the `xinput` command above.
+     Easiest fix: unplug the other monitor so the touchscreen is the only
+     display.
+   - Newer Ubuntu releases only offer Wayland (the old "Ubuntu on Xorg" login
+     option is gone), so `xinput` tricks found online no longer apply. GNOME
+     maps a touchscreen to its own monitor automatically in most cases; if it
+     does not, tell the next agent the output of `libinput list-devices`
+     (install with `sudo apt install libinput-tools`) and of
+     **Settings → Displays**, and they can set the GNOME
+     `org.gnome.desktop.peripherals.touchscreen` mapping for your device.
 4. Inside the game, taps are mapped from the screen to the game's own
    1920 × 1080 layout automatically — no calibration is needed in the game.
 
@@ -196,6 +200,6 @@ actual Ubuntu bartop:
 
 1. Snap Chromium accepts the `~/snap/chromium/common/...` profile path.
 2. GNOME autostart launches the arcade after automatic login.
-3. Touch input lands correctly on the 17" screen (Wayland and Xorg).
+3. Touch input lands correctly on the 17" screen under GNOME Wayland.
 4. Sound plays through the monitor/speakers without a first tap.
 5. Screen never blanks during a multi-hour idle period.
