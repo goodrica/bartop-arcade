@@ -11,7 +11,7 @@ A modern bartop arcade mini-game collection inspired by classics like Megatouch.
 
 ## 🚀 How to Play
 
-1. Open `index.html` in any modern browser, or visit the GitHub Pages link
+1. Start it with `./scripts/start-arcade.sh` (Ubuntu/Linux), or serve the folder and open it in a browser — see **Running Locally** below
 2. Touch the screen to select a game
 3. Touch the differences you find — correct = points, wrong = time penalty
 
@@ -60,12 +60,24 @@ Then call `registerGame(yourModule)` to add it to the menu.
 ## 🧪 Running Locally
 
 ```bash
-# Using Python (no server needed for basic HTML)
 python3 -m http.server 8080
 # Then open http://localhost:8080
 ```
 
-Or just double-click `index.html` in your file manager.
+A web server is required: the game uses JavaScript modules, which browsers
+block when `index.html` is opened directly from disk (you get a black screen).
+
+### 🐧 Ubuntu bartop (kiosk mode)
+
+```bash
+./scripts/start-arcade.sh               # full screen kiosk
+./scripts/start-arcade.sh --window      # normal window for testing
+./scripts/install-ubuntu-autostart.sh   # start automatically at login
+```
+
+Full step-by-step guide (touchscreen, sound, auto-start, troubleshooting):
+**[docs/ubuntu-setup.md](docs/ubuntu-setup.md)**. Note: this is a browser
+game, so it runs in Chromium/Firefox — not in DOSBox.
 
 ## 🤝 Contributing
 

@@ -16,6 +16,12 @@ Serve locally with:
 python3 -m http.server 8080
 ```
 
+Do not open `index.html` via `file://`; module scripts are blocked there.
+
+For the Ubuntu bartop (kiosk launcher, autostart, touchscreen setup, and what
+still needs hardware verification) read `docs/ubuntu-setup.md`, including its
+"For agents and developers" section. The game runs in a browser, not DOSBox.
+
 Test in a browser at the intended 1920 by 1080 landscape layout. Verify pointer coordinates, scaling, touch targets, timer behavior, scoring, penalties, cleanup, menu return, and audio initialization.
 
 For Photo Hunt:
